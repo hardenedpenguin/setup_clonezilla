@@ -121,7 +121,7 @@ umount "$MOUNT_POINT" || check_success "Failed to unmount the first partition."
 rm -f "$ZIP_NAME"
 
 # Ask if the user wants to skip the backup process
-echo "Do you want to skip the backup process? (yes/no)"
+echo "Would you like to add a backup from a zip online? (yes/no)"
 read SKIP_BACKUP
 
 if [ "$SKIP_BACKUP" != "yes" ]; then
