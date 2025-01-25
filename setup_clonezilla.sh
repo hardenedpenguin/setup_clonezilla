@@ -25,7 +25,7 @@ fi
 CLONEZILLA_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable/3.2.0-5/clonezilla-live-3.2.0-5-amd64.zip"  # URL to the Clonezilla zip file
 ZIP_NAME="clonezilla-live-3.2.0-5-amd64.zip"
 USB_DEVICE=""
-MOUNT_POINT=""
+MOUNT_POINT="/mnt/usb"
 CLONEZILLA_PART_SIZE=512M
 BACKUP_NAME="backup.zip"
 
@@ -37,11 +37,32 @@ check_success() {
     fi
 }
 
-# Ask for USB device and mount point
+# Function to shred the first 512 bytes of the device
+shred_device() {
+    local device=$1
+    echo "Shredding the first 512 bytes of $device..."
+    dd if=/dev/zero of=$device bs=512 count=1 conv=notrunc > /dev/null 2>&1
+    check_success "Failed to shred the device."
+}
+
+# Function to clean up before exiting
+cleanup() {
+    if mount | grep -q "$MOUNT_POINT"; then
+        echo "Unmounting $MOUNT_POINT..."
+        umount "$MOUNT_POINT" || echo "Warning: Failed to unmount $MOUNT_POINT."
+    fi
+    if [ -d "$MOUNT_POINT" ]; then
+        echo "Removing mount point $MOUNT_POINT..."
+        rmdir "$MOUNT_POINT" || echo "Warning: Failed to remove $MOUNT_POINT."
+    fi
+}
+
+# Ensure cleanup on script exit
+trap cleanup EXIT
+
+# Ask for USB device
 echo "Enter the USB device (e.g., /dev/sdX):"
 read USB_DEVICE
-echo "Enter the mount point (e.g., /mnt/usb):"
-read MOUNT_POINT
 
 # Validate inputs
 if [ ! -b "$USB_DEVICE" ]; then
@@ -62,6 +83,9 @@ if [ "$CONFIRM" != "yes" ]; then
     echo "Operation canceled."
     exit 1
 fi
+
+# Shred the first 512 bytes of the USB device
+shred_device "$USB_DEVICE"
 
 # Partition the USB drive
 echo "Partitioning the USB drive..."
