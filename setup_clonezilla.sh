@@ -1,41 +1,21 @@
 #!/bin/sh
-#
-# Download and setup Clonezilla, then install a backup if requested.
-# Copyright (C) 2025 Jory A. Pratt - W5GLE
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, version 2 of the License.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/gpl-2.0.html>.
 
-# Check if the script is being run as root
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: This script must be run as root."
-    exit 1
-fi
+set -e  # Exit on any error
 
-# Ensure required dependencies are installed
-for cmd in parted unzip; do
-    if ! command -v $cmd >/dev/null 2>&1; then
+# Dependencies check
+for cmd in parted unzip curl lsblk blkid mkfs.vfat shred; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Error: $cmd is not installed. Please install it using: apt-get install $cmd"
         exit 1
     fi
 done
 
 # Variables
-CLONEZILLA_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable/3.2.0-5/clonezilla-live-3.2.0-5-amd64.zip"  # URL to the Clonezilla zip file
-ZIP_NAME="clonezilla-live-3.2.0-5-amd64.zip"
-USB_DEVICE=""
+CLONEZILLA_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable/3.2.0-5/clonezilla-live-3.2.0-5-amd64.zip"
+ZIP_NAME="clonezilla-live.zip"
 MOUNT_POINT="/mnt/usb"
-CLONEZILLA_PART_SIZE=513M
 BACKUP_NAME="backup.zip"
+CLONEZILLA_PART_SIZE=513M
 
 # Function to check command success
 check_success() {
@@ -43,14 +23,6 @@ check_success() {
         echo "Error: $1"
         exit 1
     fi
-}
-
-# Function to shred the first 512 bytes of the device
-shred_device() {
-    local device=$1
-    echo "Shredding the first 512 bytes of $device..."
-    dd if=/dev/zero of=$device bs=512 count=1 conv=notrunc > /dev/null 2>&1
-    check_success "Failed to shred the device."
 }
 
 # Function to clean up before exiting
@@ -65,138 +37,120 @@ cleanup() {
     fi
 }
 
-# Ensure cleanup on script exit
-trap cleanup EXIT
+# Function to check internet connectivity
+check_internet() {
+    echo "Checking internet connectivity..."
+    if ! curl -s --head --request GET https://www.google.com | grep "200" >/dev/null; then
+        echo "No internet connection detected."
+        exit 1
+    fi
+}
 
 # Ask for USB device
-echo "Enter the USB device (e.g., /dev/sdX):"
-read USB_DEVICE
+while :; do
+    echo "Available block devices:"
+    lsblk -d -o NAME,SIZE,TYPE | grep "disk"
+    
+    echo "Enter the device you want to use (e.g., sdX or mmcblkX):"
+    read -r USB_DEVICE
+    USB_DEVICE="/dev/$USB_DEVICE"
+    
+    if [ -b "$USB_DEVICE" ]; then
+        break
+    else
+        echo "$USB_DEVICE is not a valid block device."
+    fi
+done
 
-# Validate inputs
-if [ ! -b "$USB_DEVICE" ]; then
-    echo "Error: $USB_DEVICE is not a valid block device."
-    exit 1
-fi
+# Check USB device size (in bytes)
+DEVICE_SIZE=$(lsblk -b -o SIZE -n -d "$USB_DEVICE")
 
-# Check if the block device is at least 8GB
-DEVICE_SIZE=$(lsblk -b -o SIZE -n "$USB_DEVICE")
+# Check if the device size is at least 8GB (8 * 1024 * 1024 * 1024 bytes)
 if [ "$DEVICE_SIZE" -lt $((8 * 1024 * 1024 * 1024)) ]; then
-    echo "Error: The device must be at least 8GB."
+    echo "The device must be at least 8GB."
     exit 1
 fi
 
-# Option to add an additional backup zip without creating a new drive
-echo "Would you like to add an additional backup zip without formatting? (yes/no)"
-read ADD_BACKUP
-
-if [ "$ADD_BACKUP" = "yes" ]; then
-    # Ask for backup file URL and name
-    echo "Enter the URL of the backup file to download and extract to the second partition:"
-    read BACKUP_URL
-    
-    # Mount the second partition
-    echo "Mounting the second partition..."
-    mount "${USB_DEVICE}2" "$MOUNT_POINT" || check_success "Failed to mount the second partition."
-
-    # Download and extract the backup file
-    echo "Downloading the backup file..."
-    wget -O "$BACKUP_NAME" "$BACKUP_URL" > /dev/null 2>&1 || curl -s -o "$BACKUP_NAME" "$BACKUP_URL"
-    check_success "Failed to download the backup file."
-
-    echo "Extracting the backup file to the second partition..."
-    unzip "$BACKUP_NAME" -d "$MOUNT_POINT" > /dev/null 2>&1 || check_success "Failed to extract the backup file."
-
-    # Clean up and unmount second partition
-    echo "Unmounting the second partition..."
-    umount "$MOUNT_POINT" || check_success "Failed to unmount the second partition."
-    rm -f "$BACKUP_NAME"
-    
-    echo "Backup added successfully!"
-    exit 0
-fi
-
-if [ ! -d "$MOUNT_POINT" ]; then
-    echo "Creating mount point $MOUNT_POINT..."
-    mkdir -p "$MOUNT_POINT"
-    check_success "Failed to create mount point."
-fi
-
-# Confirm the USB device
-echo "WARNING: This will erase all data on $USB_DEVICE. Continue? (yes/no)"
-read CONFIRM
+# Confirm USB wipe
+echo "WARNING: This will erase all data on $USB_DEVICE. Continue? (yes/no) [no]:"
+read -r CONFIRM
+CONFIRM=${CONFIRM:-no}
 if [ "$CONFIRM" != "yes" ]; then
     echo "Operation canceled."
     exit 1
 fi
 
-# Ensure if device was automounted we unmount it
-umount "$USB_DEVICE"*
+# Unmount any existing partitions
+umount "$USB_DEVICE"* > /dev/null 2>&1 || true
 
-# Shred the first 512 bytes of the USB device
-shred_device "$USB_DEVICE"
+# Shred the first 1MB of the USB device
+echo "Shredding the first 1MB of $USB_DEVICE..."
+shred -n 1 -z -s 1M "$USB_DEVICE" || check_success "Failed to shred the device."
 
 # Partition the USB drive
 echo "Partitioning the USB drive..."
-parted -a optimal "$USB_DEVICE" mklabel gpt || check_success "Failed to create GPT label."
-parted "$USB_DEVICE" mkpart primary fat32 1MiB "$CLONEZILLA_PART_SIZE" || check_success "Failed to create Clonezilla partition."
-parted "$USB_DEVICE" mkpart primary fat32 "$CLONEZILLA_PART_SIZE" 100% || check_success "Failed to create second FAT32 partition."
-parted "$USB_DEVICE" set 1 boot on || check_success "Failed to mark the partition as bootable."
-parted "$USB_DEVICE" print
-
-# Inform the system to re-read the partition table
+parted -s "$USB_DEVICE" mklabel gpt || check_success "Failed to create GPT label."
+parted -s "$USB_DEVICE" mkpart primary fat32 1MiB "$CLONEZILLA_PART_SIZE" || check_success "Failed to create partition."
+parted -s "$USB_DEVICE" mkpart primary fat32 "$CLONEZILLA_PART_SIZE" 100% || check_success "Failed to create second partition."
+parted -s "$USB_DEVICE" set 1 boot on || check_success "Failed to set boot flag on first partition."
 partprobe "$USB_DEVICE" || check_success "Failed to update partition table."
 
+# Wait for the system to update partition table
+sleep 3
+
+# Determine partition names dynamically
+PART1=$(lsblk -lnpo NAME,TYPE "$USB_DEVICE" | awk '$2=="part"{print $1}' | sed -n '1p')
+PART2=$(lsblk -lnpo NAME,TYPE "$USB_DEVICE" | awk '$2=="part"{print $1}' | sed -n '2p')
+
+if [ -z "$PART1" ] || [ -z "$PART2" ]; then
+    echo "Could not determine partition names."
+    exit 1
+fi
+
 # Create filesystems
-echo "Creating file system on the Clonezilla partition (FAT32)..."
-mkfs.vfat -F 32 "${USB_DEVICE}1" > /dev/null 2>&1 || check_success "Failed to create file system on Clonezilla partition."
-echo "Creating file system on the second partition (FAT32)..."
-mkfs.vfat -F 32 "${USB_DEVICE}2" > /dev/null 2>&1 || check_success "Failed to create file system on second partition."
+mkfs.vfat -F 32 "$PART1" > /dev/null 2>&1 || check_success "Failed to create file system on Clonezilla partition."
+mkfs.vfat -F 32 "$PART2" > /dev/null 2>&1 || check_success "Failed to create file system on second partition."
 
-# Mount the partitions for Clonezilla
-echo "Mounting $USB_DEVICE..."
-mount "${USB_DEVICE}1" "$MOUNT_POINT" || check_success "Failed to mount the first partition."
+# Create the mount point if it doesn't exist
+if [ ! -d "$MOUNT_POINT" ]; then
+    echo "Creating mount point $MOUNT_POINT..."
+    mkdir -p "$MOUNT_POINT" || check_success "Failed to create mount point."
+fi
 
-# Download Clonezilla Zip file
-echo "Downloading Clonezilla Zip file..."
-wget -O "$ZIP_NAME" "$CLONEZILLA_URL" > /dev/null 2>&1 || curl -s -o "$ZIP_NAME" "$CLONEZILLA_URL"
-check_success "Failed to download Clonezilla."
+# Mount Clonezilla partition
+mount "$PART1" "$MOUNT_POINT" || check_success "Failed to mount Clonezilla partition."
 
-# Extract Clonezilla Zip file to the first partition
-echo "Extracting Clonezilla Zip file to the first partition..."
+# Check internet connectivity before downloading
+check_internet
+
+# Download and extract Clonezilla
+echo "Downloading Clonezilla..."
+curl -s -L -o "$ZIP_NAME" "$CLONEZILLA_URL" || check_success "Failed to download Clonezilla."
 unzip "$ZIP_NAME" -d "$MOUNT_POINT" > /dev/null 2>&1 || check_success "Failed to extract Clonezilla zip file."
 
-# Clean up and unmount Clonezilla partition
-echo "Unmounting Clonezilla partition..."
-umount "$MOUNT_POINT" || check_success "Failed to unmount the first partition."
+# Clean up Clonezilla
+umount "$MOUNT_POINT" || check_success "Failed to unmount Clonezilla partition."
 rm -f "$ZIP_NAME"
 
-# Ask if the user wants to skip the backup process
-echo "Would you like to add a backup from a zip online? (yes/no)"
-read SKIP_BACKUP
+# Ask if the user wants to add a backup
+echo "Would you like to add a backup from a zip online? (yes/no) [yes]:"
+read -r SKIP_BACKUP
+SKIP_BACKUP=${SKIP_BACKUP:-yes}
 
-if [ "$SKIP_BACKUP" != "no" ]; then
-    # Ask for backup file URL and name
+if [ "$SKIP_BACKUP" = "yes" ]; then
     echo "Enter the URL of the backup file to download and extract to the second partition:"
-    read BACKUP_URL
+    read -r BACKUP_URL
 
-    # Mount the second partition
-    echo "Mounting the second partition..."
-    mount "${USB_DEVICE}2" "$MOUNT_POINT" || check_success "Failed to mount the second partition."
+    mount "$PART2" "$MOUNT_POINT" || check_success "Failed to mount second partition."
 
     # Download and extract the backup file
     echo "Downloading the backup file..."
-    wget -O "$BACKUP_NAME" "$BACKUP_URL" > /dev/null 2>&1 || curl -s -o "$BACKUP_NAME" "$BACKUP_URL"
-    check_success "Failed to download the backup file."
-
+    curl -s -L -o "$BACKUP_NAME" "$BACKUP_URL" || check_success "Failed to download the backup file."
     echo "Extracting the backup file to the second partition..."
     unzip "$BACKUP_NAME" -d "$MOUNT_POINT" > /dev/null 2>&1 || check_success "Failed to extract the backup file."
 
-    # Clean up and unmount second partition
-    echo "Unmounting the second partition..."
-    umount "$MOUNT_POINT" || check_success "Failed to unmount the second partition."
+    umount "$MOUNT_POINT" || check_success "Failed to unmount backup partition."
     rm -f "$BACKUP_NAME"
-else
-    echo "Skipping the backup process as per user request."
 fi
 
 echo "Setup completed successfully!"
