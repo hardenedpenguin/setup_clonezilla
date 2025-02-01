@@ -85,6 +85,36 @@ if [ "$DEVICE_SIZE" -lt $((8 * 1024 * 1024 * 1024)) ]; then
     exit 1
 fi
 
+# Option to add an additional backup zip without creating a new drive
+echo "Would you like to add an additional backup zip without formatting? (yes/no)"
+read ADD_BACKUP
+
+if [ "$ADD_BACKUP" = "yes" ]; then
+    # Ask for backup file URL and name
+    echo "Enter the URL of the backup file to download and extract to the second partition:"
+    read BACKUP_URL
+    
+    # Mount the second partition
+    echo "Mounting the second partition..."
+    mount "${USB_DEVICE}2" "$MOUNT_POINT" || check_success "Failed to mount the second partition."
+
+    # Download and extract the backup file
+    echo "Downloading the backup file..."
+    wget -O "$BACKUP_NAME" "$BACKUP_URL" > /dev/null 2>&1 || curl -s -o "$BACKUP_NAME" "$BACKUP_URL"
+    check_success "Failed to download the backup file."
+
+    echo "Extracting the backup file to the second partition..."
+    unzip "$BACKUP_NAME" -d "$MOUNT_POINT" > /dev/null 2>&1 || check_success "Failed to extract the backup file."
+
+    # Clean up and unmount second partition
+    echo "Unmounting the second partition..."
+    umount "$MOUNT_POINT" || check_success "Failed to unmount the second partition."
+    rm -f "$BACKUP_NAME"
+    
+    echo "Backup added successfully!"
+    exit 0
+fi
+
 if [ ! -d "$MOUNT_POINT" ]; then
     echo "Creating mount point $MOUNT_POINT..."
     mkdir -p "$MOUNT_POINT"
