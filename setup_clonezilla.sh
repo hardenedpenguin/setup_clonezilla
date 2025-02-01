@@ -1,4 +1,19 @@
 #!/bin/sh
+#
+# Download and setup Clonezilla, then install a backup if requested.
+# Copyright (C) 2025 Jory A. Pratt - W5GLE
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/gpl-2.0.html>.
 
 set -e  # Exit on any error
 
@@ -131,6 +146,7 @@ check_internet
 # Download and extract Clonezilla
 echo "Downloading Clonezilla..."
 curl -s -L -o "$ZIP_NAME" "$CLONEZILLA_URL" || check_success "Failed to download Clonezilla."
+echo "Extracting Clonezilla..."
 unzip "$ZIP_NAME" -d "$MOUNT_POINT" > /dev/null 2>&1 || check_success "Failed to extract Clonezilla zip file."
 
 # Clean up Clonezilla
@@ -151,7 +167,7 @@ if [ "$SKIP_BACKUP" = "yes" ]; then
     # Download and extract the backup file
     echo "Downloading the backup file..."
     curl -s -L -o "$BACKUP_NAME" "$BACKUP_URL" || check_success "Failed to download the backup file."
-    echo "Extracting the backup file to the second partition..."
+    echo "Extracting backup..."
     unzip "$BACKUP_NAME" -d "$MOUNT_POINT" > /dev/null 2>&1 || check_success "Failed to extract the backup file."
 
     umount "$MOUNT_POINT" || check_success "Failed to unmount backup partition."
