@@ -26,7 +26,7 @@ CLONEZILLA_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_liv
 ZIP_NAME="clonezilla-live-3.2.0-5-amd64.zip"
 USB_DEVICE=""
 MOUNT_POINT="/mnt/usb"
-CLONEZILLA_PART_SIZE=512M
+CLONEZILLA_PART_SIZE=513M
 BACKUP_NAME="backup.zip"
 
 # Function to check command success
@@ -84,14 +84,19 @@ if [ "$CONFIRM" != "yes" ]; then
     exit 1
 fi
 
+# Ensure if device was automounted we unmount it
+umount "$USB_DEVICE"*
+
 # Shred the first 512 bytes of the USB device
 shred_device "$USB_DEVICE"
 
 # Partition the USB drive
 echo "Partitioning the USB drive..."
-parted "$USB_DEVICE" mklabel gpt || check_success "Failed to create GPT label."
+parted -a optimal "$USB_DEVICE" mklabel gpt || check_success "Failed to create GPT label."
 parted "$USB_DEVICE" mkpart primary fat32 1MiB "$CLONEZILLA_PART_SIZE" || check_success "Failed to create Clonezilla partition."
 parted "$USB_DEVICE" mkpart primary fat32 "$CLONEZILLA_PART_SIZE" 100% || check_success "Failed to create second FAT32 partition."
+parted "$USB_DEVICE" set 1 boot on || check_success "Failed to mark the partition as bootable."
+parted "$USB_DEVICE" print
 
 # Inform the system to re-read the partition table
 partprobe "$USB_DEVICE" || check_success "Failed to update partition table."
@@ -124,7 +129,7 @@ rm -f "$ZIP_NAME"
 echo "Would you like to add a backup from a zip online? (yes/no)"
 read SKIP_BACKUP
 
-if [ "$SKIP_BACKUP" != "yes" ]; then
+if [ "$SKIP_BACKUP" != "no" ]; then
     # Ask for backup file URL and name
     echo "Enter the URL of the backup file to download and extract to the second partition:"
     read BACKUP_URL
