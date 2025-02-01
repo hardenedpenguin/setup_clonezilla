@@ -21,6 +21,14 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Ensure required dependencies are installed
+for cmd in parted unzip; do
+    if ! command -v $cmd >/dev/null 2>&1; then
+        echo "Error: $cmd is not installed. Please install it using: apt-get install $cmd"
+        exit 1
+    fi
+done
+
 # Variables
 CLONEZILLA_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable/3.2.0-5/clonezilla-live-3.2.0-5-amd64.zip"  # URL to the Clonezilla zip file
 ZIP_NAME="clonezilla-live-3.2.0-5-amd64.zip"
@@ -67,6 +75,13 @@ read USB_DEVICE
 # Validate inputs
 if [ ! -b "$USB_DEVICE" ]; then
     echo "Error: $USB_DEVICE is not a valid block device."
+    exit 1
+fi
+
+# Check if the block device is at least 8GB
+DEVICE_SIZE=$(lsblk -b -o SIZE -n "$USB_DEVICE")
+if [ "$DEVICE_SIZE" -lt $((8 * 1024 * 1024 * 1024)) ]; then
+    echo "Error: The device must be at least 8GB."
     exit 1
 fi
 
