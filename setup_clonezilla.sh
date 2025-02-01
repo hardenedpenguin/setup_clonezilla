@@ -2,6 +2,11 @@
 
 set -e  # Exit on any error
 
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: This script must be run as root."
+    exit 1
+fi
+
 # Dependencies check
 for cmd in parted unzip curl lsblk blkid mkfs.vfat shred; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
