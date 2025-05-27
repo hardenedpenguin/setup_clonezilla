@@ -7,7 +7,7 @@ For The Dell 3040 to be used with asl3 please provide the url when asked, this b
 I simply added asl and asl3-pi-appliance to help users along. We also have updated NetworkManager to manage all net devices, along
 with blacklisting the dw_dmac_core module so your node will reboot and shutdown if you so wish.
 ```
-https://dev.gentoo.org/~anarchy/Dell-3040-2025-01-30-img.zip
+http://w5gle.us/~anarchy/Dell-3040-2025-01-30-img.zip
 ```
 The default username/password is hamradio, you can use passwd after login to change it, you might also need to reconfigure your
 timezone. This can be accomplished with the following command
