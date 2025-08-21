@@ -6,6 +6,8 @@ a backup to the device for use from the internet. Any modifications please feel 
 For The Dell 3040 to be used with asl3 please provide the url when asked, this backup file is a generic install of debian 12,
 I simply added asl and asl3-pi-appliance to help users along. We also have updated NetworkManager to manage all net devices, along
 with blacklisting the dw_dmac_core module so your node will reboot and shutdown if you so wish.
+
+**Important Note**: While this backup is labeled for Dell 3040, it is compatible with all x86_64 devices. The backup contains a generic Debian 12 installation with ASL3 pre-configured, making it suitable for any x86_64 system.
 ```
 https://w5gle.us/~anarchy/Dell-3040-2025-08-10-01-img.zip
 ```
