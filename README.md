@@ -9,7 +9,7 @@ with blacklisting the dw_dmac_core module so your node will reboot and shutdown 
 
 **Important Note**: While this backup is labeled for Dell 3040, it is compatible with all x86_64 devices. The backup contains a generic Debian 12 installation with ASL3 pre-configured, making it suitable for any x86_64 system.
 ```
-https://w5gle.us/~anarchy/Dell-3040-2025-08-10-01-img.zip
+https://anarchy.w5gle.us/Dell-3040-2025-08-10-01-img.zip
 ```
 The default username/password is hamradio, you can use passwd after login to change it, you might also need to reconfigure your
 timezone. This can be accomplished with the following command
