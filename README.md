@@ -46,9 +46,11 @@ The script will automatically check for and install these packages:
 parted unzip curl lsblk blkid mkfs.vfat shred wget
 ```
 
-Install missing dependencies:
+**Note**: You do not need to manually install these dependencies. The script will automatically check for them and provide installation instructions if any are missing.
+
+If you need to install dependencies manually:
 ```bash
-sudo apt-get install parted unzip curl lsblk blkid dosfstools secure-delete wget
+sudo apt-get install parted unzip curl util-linux dosfstools secure-delete wget
 ```
 
 ## 🚀 Installation

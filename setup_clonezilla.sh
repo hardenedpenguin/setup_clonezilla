@@ -131,7 +131,7 @@ check_dependencies() {
     
     if [ ${#missing_deps[@]} -gt 0 ]; then
         print_status "ERROR" "Missing dependencies: ${missing_deps[*]}"
-        print_status "INFO" "Install them using: apt-get install ${missing_deps[*]}"
+        print_status "INFO" "Install them using: apt-get install parted unzip curl util-linux dosfstools secure-delete wget"
         exit 1
     fi
 }
