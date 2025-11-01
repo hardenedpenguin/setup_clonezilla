@@ -358,22 +358,26 @@ cleanup_and_exit() {
 get_latest_clonezilla_version() {
     local url="${CLONEZILLA_BASE_URL}/"
     local version=""
+    local versions=""
     
     log_verbose "Fetching latest Clonezilla version from SourceForge..."
     
-    # Try to parse directory listing from SourceForge
+    # Parse all versions from SourceForge directory listing
     # SourceForge shows versions in format: clonezilla_live_stable/VERSION/
-    version=$(curl -sL "$url" 2>/dev/null | \
-        grep -oP 'clonezilla_live_stable/[^/]+/' | \
-        head -1 | \
+    versions=$(curl -sL "$url" 2>/dev/null | \
+        grep -oP 'clonezilla_live_stable/[0-9]+\.[0-9]+\.[0-9]+-[0-9]+/' | \
         sed 's|clonezilla_live_stable/||;s|/||' || echo "")
     
-    # Alternative: try to match version pattern directly from page
-    if [ -z "$version" ]; then
-        version=$(curl -sL "$url" 2>/dev/null | \
+    # If that didn't work, try matching version pattern directly
+    if [ -z "$versions" ]; then
+        versions=$(curl -sL "$url" 2>/dev/null | \
             grep -oP 'clonezilla-live-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' | \
-            head -1 | \
             sed 's/clonezilla-live-//' || echo "")
+    fi
+    
+    # Sort versions and get the latest one
+    if [ -n "$versions" ]; then
+        version=$(echo "$versions" | sort -V | tail -1)
     fi
     
     if [ -n "$version" ]; then
@@ -864,11 +868,13 @@ setup_clonezilla() {
             print_status "INFO" "Please specify version manually using -V or --version flag"
             return 1
         else
-            print_status "SUCCESS" "Detected latest version: $CLONEZILLA_VERSION"
+            print_status "SUCCESS" "Detected latest Clonezilla version: $CLONEZILLA_VERSION"
         fi
     else
-        print_status "INFO" "Using specified version: $CLONEZILLA_VERSION"
+        print_status "INFO" "Using specified Clonezilla version: $CLONEZILLA_VERSION"
     fi
+    
+    print_status "INFO" "Clonezilla version: $CLONEZILLA_VERSION"
     
     # Build download URL
     CLONEZILLA_URL=$(build_clonezilla_url "$CLONEZILLA_VERSION")
