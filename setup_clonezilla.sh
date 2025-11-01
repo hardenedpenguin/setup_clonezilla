@@ -27,10 +27,13 @@ LOG_FILE="/tmp/${SCRIPT_NAME}.log"
 LOCK_FILE="/tmp/${SCRIPT_NAME}.lock"
 
 # Variables
-CLONEZILLA_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable/3.2.0-5/clonezilla-live-3.2.0-5-amd64.zip"
+CLONEZILLA_BASE_URL="https://sourceforge.net/projects/clonezilla/files/clonezilla_live_stable"
+CLONEZILLA_VERSION=""  # Auto-detect if empty, or specify with -V/--version
+CLONEZILLA_URL=""
 ZIP_NAME="clonezilla-live.zip"
 MOUNT_POINT="/mnt/usb"
 BACKUP_NAME="backup.zip"
+DOWNLOAD_DIR=""  # Default to /tmp, can be set with -D/--download-dir
 CLONEZILLA_PART_SIZE=513M
 MIN_DEVICE_SIZE=$((8 * 1024 * 1024 * 1024))  # 8GB in bytes
 MAX_RETRIES=3
@@ -106,6 +109,63 @@ log_verbose() {
     fi
 }
 
+# Function to format bytes to human-readable format
+# Description: Convert bytes to KB, MB, GB format
+# Parameters: bytes (number)
+# Returns: Prints formatted string
+format_bytes() {
+    local bytes=$1
+    if [ $bytes -ge $((1024*1024*1024)) ]; then
+        echo "$((bytes / 1024 / 1024 / 1024))GB"
+    elif [ $bytes -ge $((1024*1024)) ]; then
+        echo "$((bytes / 1024 / 1024))MB"
+    elif [ $bytes -ge 1024 ]; then
+        echo "$((bytes / 1024))KB"
+    else
+        echo "${bytes}B"
+    fi
+}
+
+# Function to check disk space
+# Description: Check if sufficient disk space is available
+# Parameters: required_bytes, check_path (directory to check)
+# Returns: 0 if sufficient, 1 if insufficient
+check_disk_space() {
+    local required=$1
+    local check_path="${2:-/tmp}"
+    local available
+    
+    available=$(df -B1 "$check_path" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    
+    if [ "$available" -lt "$required" ]; then
+        print_status "ERROR" "Insufficient disk space"
+        print_status "INFO" "Required: $(format_bytes $required), Available: $(format_bytes $available)"
+        print_status "INFO" "Suggested fix: Free up space or use -D/--download-dir to specify different location"
+        return 1
+    fi
+    
+    log_verbose "Disk space check passed: $(format_bytes $available) available"
+    return 0
+}
+
+# Function to get file size from URL
+# Description: Fetch file size from HTTP headers
+# Parameters: url
+# Returns: Prints file size in bytes, returns 0 on success
+get_url_file_size() {
+    local url="$1"
+    local size
+    
+    size=$(curl -sI "$url" 2>/dev/null | grep -i "content-length" | awk '{print $2}' | tr -d '\r' || echo "0")
+    
+    if [ -n "$size" ] && [ "$size" != "0" ]; then
+        echo "$size"
+        return 0
+    fi
+    
+    return 1
+}
+
 # =============================================================================
 # VALIDATION FUNCTIONS
 # =============================================================================
@@ -138,10 +198,15 @@ check_dependencies() {
 
 # Function to check internet connectivity with retry
 check_internet() {
+    if [ "$OFFLINE_MODE" = true ]; then
+        log_verbose "Offline mode enabled, skipping internet check"
+        return 0
+    fi
+    
     print_status "INFO" "Checking internet connectivity..."
     
     for i in $(seq 1 $MAX_RETRIES); do
-        if curl -s --max-time 10 --head --request GET https://www.google.com | grep -q "200"; then
+        if curl -s --max-time 10 --head --request GET https://www.google.com 2>/dev/null | grep -q "200"; then
             print_status "SUCCESS" "Internet connection verified"
             return 0
         fi
@@ -153,6 +218,7 @@ check_internet() {
     done
     
     print_status "ERROR" "No internet connection detected after $MAX_RETRIES attempts"
+    print_status "INFO" "Suggested fix: Check network connection or use --offline mode"
     return 1
 }
 
@@ -204,7 +270,11 @@ cleanup_and_exit() {
     cleanup_mount_point
     
     # Clean up temporary files
-    rm -f "$ZIP_NAME" "$BACKUP_NAME"
+    if [ -n "$DOWNLOAD_DIR" ]; then
+        rm -f "${DOWNLOAD_DIR}/${ZIP_NAME}" "${DOWNLOAD_DIR}/${BACKUP_NAME}"
+    else
+        rm -f "/tmp/${ZIP_NAME}" "/tmp/${BACKUP_NAME}"
+    fi
     
     # Remove lock file
     remove_lock
@@ -219,26 +289,178 @@ cleanup_and_exit() {
 }
 
 # =============================================================================
+# VERSION DETECTION
+# =============================================================================
+
+# Function to get latest Clonezilla version
+# Description: Fetch latest stable version from SourceForge
+# Parameters: None
+# Returns: Prints version string, returns 0 on success, 1 on failure
+get_latest_clonezilla_version() {
+    local url="${CLONEZILLA_BASE_URL}/"
+    local version=""
+    
+    log_verbose "Fetching latest Clonezilla version from SourceForge..."
+    
+    # Try to parse directory listing from SourceForge
+    # SourceForge shows versions in format: clonezilla_live_stable/VERSION/
+    version=$(curl -sL "$url" 2>/dev/null | \
+        grep -oP 'clonezilla_live_stable/[^/]+/' | \
+        head -1 | \
+        sed 's|clonezilla_live_stable/||;s|/||' || echo "")
+    
+    # Alternative: try to match version pattern directly from page
+    if [ -z "$version" ]; then
+        version=$(curl -sL "$url" 2>/dev/null | \
+            grep -oP 'clonezilla-live-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' | \
+            head -1 | \
+            sed 's/clonezilla-live-//' || echo "")
+    fi
+    
+    if [ -n "$version" ]; then
+        echo "$version"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to build Clonezilla URL
+# Description: Build download URL from version number
+# Parameters: version
+# Returns: Prints URL, returns 0 on success
+build_clonezilla_url() {
+    local version="$1"
+    local url="${CLONEZILLA_BASE_URL}/${version}/clonezilla-live-${version}-amd64.zip"
+    echo "$url"
+}
+
+# =============================================================================
 # NETWORK OPERATIONS
 # =============================================================================
 
-# Function to download file with progress and retry
+# Function to check if string is a URL
+# Description: Detect if input is a URL or local file path
+# Parameters: input_string
+# Returns: 0 if URL, 1 if local path
+is_url() {
+    [[ "$1" =~ ^https?:// ]] || [[ "$1" =~ ^ftp:// ]] || [[ "$1" =~ ^file:// ]]
+}
+
+# Function to check if string is a local file path
+# Description: Verify if input is a valid local file path
+# Parameters: file_path
+# Returns: 0 if valid file, 1 if not
+is_local_file() {
+    local file_path="$1"
+    
+    # Expand ~ and resolve relative paths
+    file_path="${file_path/#\~/$HOME}"
+    if [[ "$file_path" != /* ]]; then
+        file_path="$(pwd)/$file_path"
+    fi
+    
+    [ -f "$file_path" ] && [ -r "$file_path" ]
+}
+
+# Function to copy local file
+# Description: Copy local file to destination
+# Parameters: source_path, dest_path, description
+# Returns: 0 on success, 1 on failure
+copy_local_file() {
+    local source="$1"
+    local dest="$2"
+    local description="$3"
+    local dest_dir
+    dest_dir=$(dirname "$dest")
+    local file_size=0
+    
+    # Expand ~ and resolve relative paths
+    source="${source/#\~/$HOME}"
+    if [[ "$source" != /* ]]; then
+        source="$(pwd)/$source"
+    fi
+    
+    if [ ! -f "$source" ]; then
+        print_status "ERROR" "Local file not found: $source"
+        return 1
+    fi
+    
+    if [ ! -r "$source" ]; then
+        print_status "ERROR" "Cannot read file: $source"
+        return 1
+    fi
+    
+    # Check disk space before copying
+    print_status "INFO" "Checking disk space..."
+    file_size=$(stat -f%z "$source" 2>/dev/null || stat -c%s "$source" 2>/dev/null || echo "0")
+    
+    if [ "$file_size" -gt 0 ]; then
+        log_verbose "File size: $(format_bytes $file_size)"
+        check_disk_space "$file_size" "$dest_dir" || return 1
+    fi
+    
+    print_status "INFO" "Copying $description..."
+    
+    cp "$source" "$dest" || {
+        print_status "ERROR" "Failed to copy $description"
+        return 1
+    }
+    
+    print_status "SUCCESS" "$description copied successfully"
+    return 0
+}
+
+# Function to download file with progress, retry, and resume support
 download_file() {
     local url="$1"
     local output="$2"
     local description="$3"
+    local expected_checksum="${4:-}"  # Optional checksum for verification
+    local output_dir
+    output_dir=$(dirname "$output")
+    local resume_flag=""
+    
+    # Check if partial download exists and can resume
+    if [ -f "$output" ] && [ -s "$output" ]; then
+        if curl -s --head --range 0-0 "$url" >/dev/null 2>&1; then
+            resume_flag="-C -"
+            print_status "INFO" "Resuming partial download..."
+        fi
+    fi
+    
+    # Check disk space before downloading
+    print_status "INFO" "Checking disk space..."
+    local file_size=0
+    file_size=$(get_url_file_size "$url" || echo "0")
+    
+    if [ "$file_size" -gt 0 ]; then
+        log_verbose "File size: $(format_bytes $file_size)"
+        check_disk_space "$file_size" "$output_dir" || return 1
+    else
+        # If we can't get size, estimate 1GB for safety (Clonezilla is typically 400-800MB)
+        log_verbose "Could not determine file size, checking for 1GB minimum"
+        check_disk_space $((1024*1024*1024)) "$output_dir" || return 1
+    fi
     
     print_status "INFO" "Downloading $description..."
     
     for i in $(seq 1 $MAX_RETRIES); do
-        if curl -L -o "$output" --progress-bar --max-time $DOWNLOAD_TIMEOUT "$url"; then
+        if curl -L -o "$output" $resume_flag --progress-bar --max-time $DOWNLOAD_TIMEOUT "$url" 2>&1; then
             print_status "SUCCESS" "$description downloaded successfully"
+            
+            # Verify checksum if provided
+            if [ -n "$expected_checksum" ]; then
+                verify_checksum "$output" "$expected_checksum" || return 1
+            fi
+            
             return 0
         fi
         
         if [ $i -lt $MAX_RETRIES ]; then
             print_status "WARNING" "Download failed, retrying in 5 seconds... (attempt $i/$MAX_RETRIES)"
             sleep 5
+            resume_flag="-C -"  # Try to resume on retry
         fi
     done
     
@@ -299,6 +521,48 @@ detect_clonezilla_drive() {
     return 0
 }
 
+# Function to check if device is removable
+# Description: Check if device is a USB/SD card (removable)
+# Parameters: device_path
+# Returns: 0 if removable, 1 if not
+is_removable_device() {
+    local device="$1"
+    local sys_path="/sys/block/$(basename "$device")/removable"
+    
+    if [ -f "$sys_path" ]; then
+        local removable=$(cat "$sys_path" 2>/dev/null || echo "0")
+        [ "$removable" = "1" ]
+        return $?
+    fi
+    
+    return 1
+}
+
+# Function to check if device is system disk
+# Description: Check if device appears to be system/root disk
+# Parameters: device_path
+# Returns: 0 if system disk, 1 if not
+is_system_disk() {
+    local device="$1"
+    local device_name=$(basename "$device")
+    
+    # Check if device contains root filesystem
+    if mount | grep -q "^/dev/${device_name}" && mount | grep -q " on / "; then
+        return 0
+    fi
+    
+    # Check if it's typically a system disk (could be, but not always)
+    case "$device_name" in
+        sda|nvme0n1|mmcblk0)
+            # Could be system disk, but not always - return uncertain
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Function to safely get device information
 get_device_info() {
     local device="$1"
@@ -306,13 +570,30 @@ get_device_info() {
     # Check if device exists and is a block device
     if [ ! -b "$device" ]; then
         print_status "ERROR" "Device $device does not exist or is not a block device"
+        print_status "INFO" "Suggested fix: Check device name with 'lsblk' command"
         return 1
     fi
     
     # Check if device is mounted
     if mount | grep -q "$device"; then
         print_status "ERROR" "Device $device is currently mounted. Please unmount it first."
+        print_status "INFO" "Suggested fix: Run 'umount ${device}*' to unmount all partitions"
         return 1
+    fi
+    
+    # Warn if system disk
+    if is_system_disk "$device"; then
+        print_status "WARNING" "Device $device may be the system disk!"
+        print_status "WARNING" "Continuing may cause data loss!"
+        if [ "$SKIP_CONFIRM" != true ]; then
+            echo -n "Continue anyway? (yes/no) [no]: "
+            read -r confirm
+            if [ "$confirm" != "yes" ]; then
+                return 1
+            fi
+        else
+            print_status "WARNING" "Skipping confirmation (--yes flag used)"
+        fi
     fi
     
     # Get device size
@@ -320,7 +601,8 @@ get_device_info() {
     device_size=$(lsblk -b -o SIZE -n -d "$device" 2>/dev/null || echo "0")
     
     if [ "$device_size" -lt $MIN_DEVICE_SIZE ]; then
-        print_status "ERROR" "Device $device is too small. Minimum size required: 8GB"
+        print_status "ERROR" "Device $device is too small. Minimum size required: $(format_bytes $MIN_DEVICE_SIZE)"
+        print_status "INFO" "Device size: $(format_bytes $device_size)"
         return 1
     fi
     
@@ -338,8 +620,29 @@ get_device_info() {
 list_devices() {
     print_status "INFO" "Available block devices:"
     echo
-    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk" | while read -r line; do
-        echo "  $line"
+    printf "%-10s %-10s %-15s %-20s %-10s %s\n" "DEVICE" "SIZE" "TYPE" "MODEL" "MOUNTED" "NOTES"
+    echo "---------------------------------------------------------------------------"
+    
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep "disk" | while read -r name size type model; do
+        local device="/dev/$name"
+        local mounted=""
+        local notes=""
+        
+        if mount | grep -q "^$device"; then
+            mounted="YES"
+        else
+            mounted="NO"
+        fi
+        
+        if is_removable_device "$device"; then
+            notes="[USB/SD]"
+        fi
+        
+        if is_system_disk "$device"; then
+            notes="${notes}[SYSTEM]"
+        fi
+        
+        printf "%-10s %-10s %-15s %-20s %-10s %s\n" "$name" "$size" "$type" "$model" "$mounted" "$notes"
     done
     echo
 }
@@ -378,6 +681,12 @@ get_device_selection() {
 
 # Function to confirm device wipe
 confirm_device_wipe() {
+    if [ "$SKIP_CONFIRM" = true ]; then
+        print_status "WARNING" "Skipping confirmation (--yes flag used)"
+        print_status "WARNING" "This operation will ERASE ALL DATA on $USB_DEVICE"
+        return 0
+    fi
+    
     echo
     print_status "WARNING" "This operation will ERASE ALL DATA on $USB_DEVICE"
     print_status "WARNING" "This action cannot be undone!"
@@ -487,6 +796,25 @@ create_filesystems() {
 setup_clonezilla() {
     print_status "INFO" "Setting up Clonezilla..."
     
+    # Determine Clonezilla version
+    if [ -z "$CLONEZILLA_VERSION" ]; then
+        print_status "INFO" "Detecting latest Clonezilla version..."
+        CLONEZILLA_VERSION=$(get_latest_clonezilla_version)
+        if [ -z "$CLONEZILLA_VERSION" ]; then
+            print_status "ERROR" "Could not detect latest Clonezilla version"
+            print_status "INFO" "Please specify version manually using -V or --version flag"
+            return 1
+        else
+            print_status "SUCCESS" "Detected latest version: $CLONEZILLA_VERSION"
+        fi
+    else
+        print_status "INFO" "Using specified version: $CLONEZILLA_VERSION"
+    fi
+    
+    # Build download URL
+    CLONEZILLA_URL=$(build_clonezilla_url "$CLONEZILLA_VERSION")
+    log_verbose "Clonezilla URL: $CLONEZILLA_URL"
+    
     # Ensure mount point exists
     ensure_mount_point || return 1
     
@@ -496,12 +824,24 @@ setup_clonezilla() {
         return 1
     }
     
-    # Download Clonezilla
-    download_file "$CLONEZILLA_URL" "$ZIP_NAME" "Clonezilla Live" || return 1
+    # Set download path
+    local zip_path="${DOWNLOAD_DIR}/${ZIP_NAME}"
+    
+    # Get checksum if available
+    local checksum=""
+    if [ "$OFFLINE_MODE" != true ]; then
+        checksum=$(get_checksum_from_url "$CLONEZILLA_URL" || echo "")
+        if [ -n "$checksum" ]; then
+            log_verbose "Found checksum for verification"
+        fi
+    fi
+    
+    # Download Clonezilla (with checksum verification)
+    download_file "$CLONEZILLA_URL" "$zip_path" "Clonezilla Live" "$checksum" || return 1
     
     # Extract Clonezilla
     print_status "INFO" "Extracting Clonezilla..."
-    unzip -q "$ZIP_NAME" -d "$MOUNT_POINT" || {
+    unzip -q "$zip_path" -d "$MOUNT_POINT" || {
         print_status "ERROR" "Failed to extract Clonezilla"
         return 1
     }
@@ -512,7 +852,7 @@ setup_clonezilla() {
         return 1
     }
     
-    rm -f "$ZIP_NAME"
+    rm -f "$zip_path"
     print_status "SUCCESS" "Clonezilla setup completed"
 }
 
@@ -540,11 +880,11 @@ setup_backup() {
     fi
     
     if [ "$force_backup" = true ]; then
-        echo -n "Enter the URL of the backup file: "
-        read -r backup_url
+        echo -n "Enter the URL or path of the backup file: "
+        read -r backup_input
         
-        if [ -z "$backup_url" ]; then
-            print_status "WARNING" "No backup URL provided, skipping backup setup"
+        if [ -z "$backup_input" ]; then
+            print_status "WARNING" "No backup file provided, skipping backup setup"
             return 0
         fi
         
@@ -559,12 +899,30 @@ setup_backup() {
             return 1
         }
         
-        # Download backup
-        download_file "$backup_url" "$BACKUP_NAME" "backup file" || return 1
+        # Set backup path
+        local backup_path="${DOWNLOAD_DIR}/${BACKUP_NAME}"
+        
+        # Determine if input is URL or local file and process accordingly
+        if is_url "$backup_input"; then
+            # Download backup from URL
+            download_file "$backup_input" "$backup_path" "backup file" || return 1
+        elif is_local_file "$backup_input"; then
+            # Copy local backup file
+            local expanded_path="${backup_input/#\~/$HOME}"
+            if [[ "$expanded_path" != /* ]]; then
+                expanded_path="$(pwd)/$expanded_path"
+            fi
+            copy_local_file "$expanded_path" "$backup_path" "backup file" || return 1
+        else
+            print_status "ERROR" "Invalid backup source: $backup_input"
+            print_status "INFO" "Must be a valid URL (http://...) or local file path"
+            umount "$MOUNT_POINT" 2>/dev/null
+            return 1
+        fi
         
         # Extract backup
         print_status "INFO" "Extracting backup..."
-        unzip -q "$BACKUP_NAME" -d "$MOUNT_POINT" || {
+        unzip -q "$backup_path" -d "$MOUNT_POINT" || {
             print_status "ERROR" "Failed to extract backup"
             return 1
         }
@@ -575,7 +933,7 @@ setup_backup() {
             return 1
         }
         
-        rm -f "$BACKUP_NAME"
+        rm -f "$backup_path"
         print_status "SUCCESS" "Backup setup completed"
     fi
 }
@@ -589,22 +947,30 @@ show_usage() {
     cat << EOF
 Usage: $SCRIPT_NAME [OPTIONS]
 
-Options:
+    Options:
     -h, --help          Show this help message
     -v, --verbose       Enable verbose output
     -d, --dry-run       Show what would be done without making changes
     -l, --log-file      Specify log file (default: $LOG_FILE)
     -b, --backup-only   Only add a backup to existing Clonezilla USB drive
+    -V, --version VER    Specify Clonezilla version (default: auto-detect latest)
+    -D, --download-dir DIR  Directory for downloads (default: /tmp)
+    -o, --offline        Skip internet connectivity checks
+    -y, --yes            Skip confirmation prompts
 
 Description:
     This script downloads and sets up Clonezilla Live on a USB device.
     It creates two partitions: one for Clonezilla and one for backups.
 
 Examples:
-    $SCRIPT_NAME                    # Run with default settings
+    $SCRIPT_NAME                    # Run with default settings (auto-detect latest version)
     $SCRIPT_NAME -v                 # Run with verbose output
     $SCRIPT_NAME --dry-run          # Show what would be done
     $SCRIPT_NAME --backup-only      # Only add backup to existing drive
+    $SCRIPT_NAME -V 3.2.0-5        # Use specific Clonezilla version
+    $SCRIPT_NAME -D /var/tmp       # Use different directory for downloads
+    $SCRIPT_NAME -o                # Run in offline mode
+    $SCRIPT_NAME -y                # Skip confirmation prompts
 
 EOF
 }
@@ -633,6 +999,26 @@ parse_arguments() {
                 LOG_FILE="$2"
                 shift 2
                 ;;
+            -V|--version)
+                CLONEZILLA_VERSION="$2"
+                shift 2
+                ;;
+            -D|--download-dir)
+                DOWNLOAD_DIR="$2"
+                if [ ! -d "$DOWNLOAD_DIR" ]; then
+                    print_status "ERROR" "Download directory does not exist: $DOWNLOAD_DIR"
+                    exit 1
+                fi
+                shift 2
+                ;;
+            -o|--offline)
+                OFFLINE_MODE=true
+                shift
+                ;;
+            -y|--yes)
+                SKIP_CONFIRM=true
+                shift
+                ;;
             *)
                 print_status "ERROR" "Unknown option: $1"
                 show_usage
@@ -654,6 +1040,19 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
     
+    # Initialize download directory (default to /tmp if not set)
+    if [ -z "$DOWNLOAD_DIR" ]; then
+        DOWNLOAD_DIR="/tmp"
+    fi
+    
+    # Ensure download directory exists
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        print_status "ERROR" "Download directory does not exist: $DOWNLOAD_DIR"
+        exit 1
+    fi
+    
+    log_verbose "Download directory: $DOWNLOAD_DIR"
+    
     # Setup
     check_root
     check_dependencies
@@ -668,8 +1067,18 @@ main() {
         print_status "INFO" "BACKUP ONLY MODE - Will only add backup to existing drive"
     fi
     
-    # Check internet connectivity
-    check_internet || exit 1
+    if [ "$OFFLINE_MODE" = true ]; then
+        print_status "INFO" "OFFLINE MODE - Internet checks disabled"
+    fi
+    
+    # Check internet connectivity (unless offline mode or backup-only with local files)
+    if [ "$OFFLINE_MODE" != true ] && [ "$BACKUP_ONLY" != true ]; then
+        check_internet || exit 1
+    elif [ "$OFFLINE_MODE" != true ] && [ "$BACKUP_ONLY" = true ]; then
+        # Only check if we might need to download something
+        # (User will provide URL or file path interactively)
+        log_verbose "Skipping internet check - will check when backup source is provided"
+    fi
     
     # Get device selection
     get_device_selection
