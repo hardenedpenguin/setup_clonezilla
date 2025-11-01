@@ -53,6 +53,8 @@ PART2=""
 VERBOSE=false
 DRY_RUN=false
 BACKUP_ONLY=false
+OFFLINE_MODE=false
+SKIP_CONFIRM=false
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -139,12 +141,12 @@ check_disk_space() {
     
     if [ "$available" -lt "$required" ]; then
         print_status "ERROR" "Insufficient disk space"
-        print_status "INFO" "Required: $(format_bytes $required), Available: $(format_bytes $available)"
+        print_status "INFO" "Required: $(format_bytes "$required"), Available: $(format_bytes "$available")"
         print_status "INFO" "Suggested fix: Free up space or use -D/--download-dir to specify different location"
         return 1
     fi
     
-    log_verbose "Disk space check passed: $(format_bytes $available) available"
+    log_verbose "Disk space check passed: $(format_bytes "$available") available"
     return 0
 }
 
@@ -164,6 +166,63 @@ get_url_file_size() {
     fi
     
     return 1
+}
+
+# Function: get checksum from URL
+# Description: Fetch SHA256 checksum from .sha256 file
+# Parameters: url
+# Returns: Prints checksum, returns 0 on success
+get_checksum_from_url() {
+    local url="$1"
+    local checksum_url="${url}.sha256"
+    local checksum=""
+    
+    if [ "$OFFLINE_MODE" = true ]; then
+        return 1
+    fi
+    
+    checksum=$(curl -sL "$checksum_url" 2>/dev/null | awk '{print $1}' | head -1)
+    
+    if [ -n "$checksum" ] && [ ${#checksum} -eq 64 ]; then
+        echo "$checksum"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function: verify checksum
+# Description: Verify file SHA256 checksum
+# Parameters: file_path, expected_checksum
+# Returns: 0 if valid, 1 if invalid
+verify_checksum() {
+    local file="$1"
+    local expected="$2"
+    local actual=""
+    
+    if [ -z "$expected" ]; then
+        log_verbose "No checksum provided, skipping verification"
+        return 0
+    fi
+    
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        print_status "WARNING" "sha256sum not available, skipping checksum verification"
+        return 0
+    fi
+    
+    print_status "INFO" "Verifying checksum..."
+    actual=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
+    
+    if [ "$actual" = "$expected" ]; then
+        print_status "SUCCESS" "Checksum verification passed"
+        return 0
+    else
+        print_status "ERROR" "Checksum verification failed"
+        print_status "INFO" "Expected: $expected"
+        print_status "INFO" "Actual: $actual"
+        print_status "INFO" "File may be corrupted. Please re-download."
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -396,7 +455,7 @@ copy_local_file() {
     file_size=$(stat -f%z "$source" 2>/dev/null || stat -c%s "$source" 2>/dev/null || echo "0")
     
     if [ "$file_size" -gt 0 ]; then
-        log_verbose "File size: $(format_bytes $file_size)"
+        log_verbose "File size: $(format_bytes "$file_size")"
         check_disk_space "$file_size" "$dest_dir" || return 1
     fi
     
@@ -435,7 +494,7 @@ download_file() {
     file_size=$(get_url_file_size "$url" || echo "0")
     
     if [ "$file_size" -gt 0 ]; then
-        log_verbose "File size: $(format_bytes $file_size)"
+        log_verbose "File size: $(format_bytes "$file_size")"
         check_disk_space "$file_size" "$output_dir" || return 1
     else
         # If we can't get size, estimate 1GB for safety (Clonezilla is typically 400-800MB)
@@ -601,8 +660,8 @@ get_device_info() {
     device_size=$(lsblk -b -o SIZE -n -d "$device" 2>/dev/null || echo "0")
     
     if [ "$device_size" -lt $MIN_DEVICE_SIZE ]; then
-        print_status "ERROR" "Device $device is too small. Minimum size required: $(format_bytes $MIN_DEVICE_SIZE)"
-        print_status "INFO" "Device size: $(format_bytes $device_size)"
+        print_status "ERROR" "Device $device is too small. Minimum size required: $(format_bytes "$MIN_DEVICE_SIZE")"
+        print_status "INFO" "Device size: $(format_bytes "$device_size")"
         return 1
     fi
     
