@@ -117,14 +117,38 @@ log_verbose() {
 # Returns: Prints formatted string
 format_bytes() {
     local bytes=$1
-    if [ $bytes -ge $((1024*1024*1024)) ]; then
+    if [ "$bytes" -ge $((1024*1024*1024)) ]; then
         echo "$((bytes / 1024 / 1024 / 1024))GB"
-    elif [ $bytes -ge $((1024*1024)) ]; then
+    elif [ "$bytes" -ge $((1024*1024)) ]; then
         echo "$((bytes / 1024 / 1024))MB"
-    elif [ $bytes -ge 1024 ]; then
+    elif [ "$bytes" -ge 1024 ]; then
         echo "$((bytes / 1024))KB"
     else
         echo "${bytes}B"
+    fi
+}
+
+# Function to convert human-readable size (e.g., 513M) to bytes
+# Description: Supports optional suffixes K, M, G, T (case-insensitive)
+# Parameters: size string
+# Returns: Prints bytes (number), defaults to 0 on failure
+convert_size_to_bytes() {
+    local size_str="${1^^}"  # Uppercase for consistent parsing
+    local value unit multiplier
+
+    if [[ "$size_str" =~ ^([0-9]+)([KMGTP]?)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        unit="${BASH_REMATCH[2]}"
+        case "$unit" in
+            K) multiplier=$((1024));;
+            M) multiplier=$((1024*1024));;
+            G) multiplier=$((1024*1024*1024));;
+            T) multiplier=$((1024*1024*1024*1024));;
+            *) multiplier=1;;
+        esac
+        echo $((value * multiplier))
+    else
+        echo 0
     fi
 }
 
@@ -151,16 +175,17 @@ check_disk_space() {
 }
 
 # Function to get file size from URL
-# Description: Fetch file size from HTTP headers
+# Description: Fetch file size from HTTP headers (follow redirects)
 # Parameters: url
 # Returns: Prints file size in bytes, returns 0 on success
 get_url_file_size() {
     local url="$1"
     local size
     
-    size=$(curl -sI "$url" 2>/dev/null | grep -i "content-length" | awk '{print $2}' | tr -d '\r' || echo "0")
+    size=$(curl -sIL --fail "$url" 2>/dev/null | \
+        awk '/[Cc]ontent-[Ll]ength/ {size=$2} END {gsub("\r","",size); print size+0}' || echo "0")
     
-    if [ -n "$size" ] && [ "$size" != "0" ]; then
+    if [ -n "$size" ] && [ "$size" -gt 0 ]; then
         echo "$size"
         return 0
     fi
@@ -495,16 +520,26 @@ download_file() {
     # Check disk space before downloading
     print_status "INFO" "Checking disk space..."
     local file_size=0
+    local required_bytes=0
     file_size=$(get_url_file_size "$url" || echo "0")
     
     if [ "$file_size" -gt 0 ]; then
+        required_bytes="$file_size"
         log_verbose "File size: $(format_bytes "$file_size")"
-        check_disk_space "$file_size" "$output_dir" || return 1
     else
-        # If we can't get size, estimate 1GB for safety (Clonezilla is typically 400-800MB)
-        log_verbose "Could not determine file size, checking for 1GB minimum"
-        check_disk_space $((1024*1024*1024)) "$output_dir" || return 1
+        # If we can't get size, base estimate on partition size plus safety margin
+        local part_bytes
+        part_bytes=$(convert_size_to_bytes "$CLONEZILLA_PART_SIZE")
+        if [ -z "$part_bytes" ] || [ "$part_bytes" -le 0 ]; then
+            part_bytes=$((600 * 1024 * 1024))  # Fallback to 600MB if parsing fails
+        fi
+        required_bytes=$((part_bytes + (100 * 1024 * 1024)))  # Add 100MB buffer
+        log_verbose "Could not determine file size, requiring $(format_bytes "$required_bytes") based on partition size"
     fi
+
+    log_verbose "Ensuring $(format_bytes "$required_bytes") free in $output_dir before download"
+    
+    check_disk_space "$required_bytes" "$output_dir" || return 1
     
     print_status "INFO" "Downloading $description..."
     
