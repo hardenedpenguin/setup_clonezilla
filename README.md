@@ -143,6 +143,20 @@ A pre-configured Debian 12 system with ASL3 (AllStar Link) ready for amateur rad
 - dw_dmac_core module blacklisted for proper reboot/shutdown
 - Default credentials: `hamradio` / `hamradio`
 
+### ASL3 Trixie Backup
+
+A pre-configured Debian Trixie (stable) system with ASL3 (AllStar Link) ready for amateur radio use.
+
+**URL**: `https://anarchy.w5gle.us/index.php?download=1&file=asl3_trixie_amd64_2025-12-25-17.zip`
+
+**Important Note**: This backup is compatible with all x86_64 devices. The backup contains a generic Debian Trixie installation with ASL3 pre-configured, making it suitable for any x86_64 system.
+
+**Features**:
+- Debian Trixie (stable) base system
+- ASL3 and asl3-appliance-pc pre-installed
+- NetworkManager configured for all network devices
+- Default credentials: `hamradio` / `hamradio` (same as Dell 3040 image)
+
 ### Post-Installation Setup
 
 After restoring the backup, perform these steps:
