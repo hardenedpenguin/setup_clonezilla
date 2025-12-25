@@ -132,7 +132,7 @@ sudo ./setup_clonezilla.sh -l /var/log/clonezilla_setup.log
 
 A pre-configured Debian 12 system with ASL3 (AllStar Link) ready for amateur radio use.
 
-**URL**: `https://anarchy.w5gle.us/Dell-3040-2025-08-10-01-img.zip`
+**URL**: `https://anarchy.w5gle.us/index.php?download=1&file=debian-12-base-arm64%2Baml-s905x-cc-asl3.xz`
 
 **Important Note**: While this backup is labeled for Dell 3040, it is compatible with all x86_64 devices. The backup contains a generic Debian 12 installation with ASL3 pre-configured, making it suitable for any x86_64 system.
 
