@@ -33,7 +33,7 @@ CLONEZILLA_URL=""
 ZIP_NAME="clonezilla-live.zip"
 MOUNT_POINT="/mnt/usb"
 BACKUP_NAME="backup.zip"
-DOWNLOAD_DIR=""  # Default to /tmp, can be set with -D/--download-dir
+DOWNLOAD_DIR=""  # Default to /root, can be set with -D/--download-dir
 CLONEZILLA_PART_SIZE=513M
 MIN_DEVICE_SIZE=$((8 * 1024 * 1024 * 1024))  # 8GB in bytes
 MAX_RETRIES=3
@@ -357,7 +357,7 @@ cleanup_and_exit() {
     if [ -n "$DOWNLOAD_DIR" ]; then
         rm -f "${DOWNLOAD_DIR}/${ZIP_NAME}" "${DOWNLOAD_DIR}/${BACKUP_NAME}"
     else
-        rm -f "/tmp/${ZIP_NAME}" "/tmp/${BACKUP_NAME}"
+        rm -f "/root/${ZIP_NAME}" "/root/${BACKUP_NAME}"
     fi
     
     # Remove lock file
@@ -1054,7 +1054,7 @@ Usage: $SCRIPT_NAME [OPTIONS]
     -l, --log-file      Specify log file (default: $LOG_FILE)
     -b, --backup-only   Only add a backup to existing Clonezilla USB drive
     -V, --version VER    Specify Clonezilla version (default: auto-detect latest)
-    -D, --download-dir DIR  Directory for downloads (default: /tmp)
+    -D, --download-dir DIR  Directory for downloads (default: /root)
     -o, --offline        Skip internet connectivity checks
     -y, --yes            Skip confirmation prompts
 
@@ -1140,14 +1140,19 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
     
-    # Initialize download directory (default to /tmp if not set)
+    # Initialize download directory (default to /root if not set)
     if [ -z "$DOWNLOAD_DIR" ]; then
-        DOWNLOAD_DIR="/tmp"
+        DOWNLOAD_DIR="/root"
     fi
     
-    # Ensure download directory exists
+    # Ensure download directory exists and is writable
     if [ ! -d "$DOWNLOAD_DIR" ]; then
         print_status "ERROR" "Download directory does not exist: $DOWNLOAD_DIR"
+        exit 1
+    fi
+    
+    if [ ! -w "$DOWNLOAD_DIR" ]; then
+        print_status "ERROR" "Download directory is not writable: $DOWNLOAD_DIR"
         exit 1
     fi
     
