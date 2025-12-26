@@ -2,20 +2,6 @@
 
 A robust, feature-rich script to download and set up Clonezilla Live on USB drives with optional backup installation.
 
-## 📋 Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Command Line Options](#command-line-options)
-- [Examples](#examples)
-- [Backup Images](#backup-images)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
 ## 🎯 Overview
 
 This script automates the process of creating a bootable Clonezilla Live USB drive. It downloads the latest stable version of Clonezilla Live, partitions your USB device, and optionally installs backup images. The script includes comprehensive error handling, safety checks, and multiple operation modes.
