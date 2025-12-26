@@ -34,6 +34,8 @@ ZIP_NAME="clonezilla-live.zip"
 MOUNT_POINT="/mnt/usb"
 BACKUP_NAME="backup.zip"
 DOWNLOAD_DIR=""  # Default to /root, can be set with -D/--download-dir
+BACKUP_ASL3_TRIXIE_URL="https://anarchy.w5gle.us/asl3_trixie_amd64_2025-12-25-17.zip"
+BACKUP_DELL_3040_URL="https://anarchy.w5gle.us/Dell-3040-2025-08-10-01-img.zip"
 CLONEZILLA_PART_SIZE=513M
 MIN_DEVICE_SIZE=$((8 * 1024 * 1024 * 1024))  # 8GB in bytes
 MAX_RETRIES=3
@@ -960,6 +962,50 @@ setup_clonezilla() {
 # BACKUP SETUP
 # =============================================================================
 
+# Function to select backup source
+select_backup_source() {
+    local backup_input=""
+    
+    echo
+    print_status "INFO" "Available backup options:"
+    echo "  1) ASL3 Trixie Backup (Debian Trixie stable with ASL3)"
+    echo "  2) Dell 3040 Backup (Debian 12 with ASL3)"
+    echo "  3) Custom backup (URL or local file path)"
+    echo
+    
+    while true; do
+        echo -n "Select backup option (1-3): "
+        read -r backup_choice
+        
+        case "$backup_choice" in
+            1)
+                backup_input="$BACKUP_ASL3_TRIXIE_URL"
+                print_status "INFO" "Selected: ASL3 Trixie Backup"
+                break
+                ;;
+            2)
+                backup_input="$BACKUP_DELL_3040_URL"
+                print_status "INFO" "Selected: Dell 3040 Backup"
+                break
+                ;;
+            3)
+                echo -n "Enter the URL or path of the backup file: "
+                read -r backup_input
+                if [ -z "$backup_input" ]; then
+                    print_status "WARNING" "No backup file provided"
+                    continue
+                fi
+                break
+                ;;
+            *)
+                print_status "ERROR" "Invalid choice. Please enter 1, 2, or 3"
+                ;;
+        esac
+    done
+    
+    echo "$backup_input"
+}
+
 # Function to setup backup
 setup_backup() {
     local force_backup=false
@@ -980,8 +1026,8 @@ setup_backup() {
     fi
     
     if [ "$force_backup" = true ]; then
-        echo -n "Enter the URL or path of the backup file: "
-        read -r backup_input
+        local backup_input
+        backup_input=$(select_backup_source)
         
         if [ -z "$backup_input" ]; then
             print_status "WARNING" "No backup file provided, skipping backup setup"

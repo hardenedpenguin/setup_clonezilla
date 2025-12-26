@@ -31,6 +31,7 @@ This script automates the process of creating a bootable Clonezilla Live USB dri
 - **🧹 Clean Cleanup**: Automatic resource cleanup on exit or failure
 - **📊 Progress Tracking**: Visual progress indicators for downloads
 - **🔧 Flexible Options**: Command line options for different use cases
+- **📦 Interactive Backup Menu**: Easy selection of predefined backup images or custom backups
 
 ## 📋 Prerequisites
 
@@ -105,12 +106,14 @@ sudo ./setup_clonezilla.sh --dry-run
 ### Example 1: Full Setup with Backup
 ```bash
 # Run full setup with interactive backup selection
+# The script will prompt you to choose from available backups or enter a custom URL/path
 sudo ./setup_clonezilla.sh -v
 ```
 
 ### Example 2: Add Backup to Existing Drive
 ```bash
 # Add backup to existing Clonezilla USB drive
+# You'll be presented with a menu to select from predefined backups or enter a custom source
 sudo ./setup_clonezilla.sh --backup-only
 ```
 
@@ -128,34 +131,13 @@ sudo ./setup_clonezilla.sh -l /var/log/clonezilla_setup.log
 
 ## 💾 Backup Images
 
-### Dell 3040 / ASL3 Backup
+When you choose to add a backup during setup, the script presents an interactive menu with the following options:
 
-A pre-configured Debian 12 system with ASL3 (AllStar Link) ready for amateur radio use.
+1. **ASL3 Trixie Backup** - Debian Trixie stable with ASL3 (AllStar Link) ready for amateur radio use
+2. **Dell 3040 Backup** - Debian 12 with ASL3 (AllStar Link) ready for amateur radio use
+3. **Custom backup** - Enter your own URL or local file path
 
-**URL**: `https://anarchy.w5gle.us/Dell-3040-2025-08-10-01-img.zip`
-
-**Important Note**: While this backup is labeled for Dell 3040, it is compatible with all x86_64 devices. The backup contains a generic Debian 12 installation with ASL3 pre-configured, making it suitable for any x86_64 system.
-
-**Features**:
-- Debian 12 base system
-- ASL3 and ASL3-pi-appliance pre-installed
-- NetworkManager configured for all network devices
-- dw_dmac_core module blacklisted for proper reboot/shutdown
-- Default credentials: `hamradio` / `hamradio`
-
-### ASL3 Trixie Backup
-
-A pre-configured Debian Trixie (stable) system with ASL3 (AllStar Link) ready for amateur radio use.
-
-**URL**: `https://anarchy.w5gle.us/asl3_trixie_amd64_2025-12-25-17.zip`
-
-**Important Note**: This backup is compatible with all x86_64 devices. The backup contains a generic Debian Trixie installation with ASL3 pre-configured, making it suitable for any x86_64 system.
-
-**Features**:
-- Debian Trixie (stable) base system
-- ASL3 and asl3-appliance-pc pre-installed
-- NetworkManager configured for all network devices
-- Default credentials: `hamradio` / `hamradio` (same as Dell 3040 image)
+**Note**: Both predefined backup images are compatible with all x86_64 devices and contain generic Debian installations with ASL3 pre-configured. Default credentials for both images are `hamradio` / `hamradio`.
 
 ### Post-Installation Setup
 
