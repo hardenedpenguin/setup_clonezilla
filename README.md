@@ -13,7 +13,7 @@ This script automates the process of creating a bootable Clonezilla Live USB dri
 - **📝 Detailed Logging**: Colored output with timestamped log files
 - **🔄 Retry Logic**: Automatic retry for network operations
 - **🔒 Lock Protection**: Prevents multiple instances from running
-- **🎛️ Multiple Modes**: Full setup, backup-only, dry-run, and verbose modes
+- **🎛️ Multiple Modes**: Full setup, backup-only, and verbose modes
 - **🧹 Clean Cleanup**: Automatic resource cleanup on exit or failure
 - **📊 Progress Tracking**: Visual progress indicators for downloads
 - **🔧 Flexible Options**: Command line options for different use cases
@@ -22,22 +22,22 @@ This script automates the process of creating a bootable Clonezilla Live USB dri
 ## 📋 Prerequisites
 
 ### System Requirements
-- Linux system with bash shell
+- Linux system with Ruby installed
 - Root access (sudo privileges)
 - Internet connection for downloading Clonezilla
 - USB device with at least 8GB capacity
 
 ### Required Dependencies
-The script will automatically check for and install these packages:
+The script requires Ruby and will automatically check for the following system packages:
 ```bash
-parted unzip curl lsblk blkid mkfs.vfat shred wget
+ruby parted unzip curl lsblk blkid mkfs.vfat shred wget
 ```
 
 **Note**: You do not need to manually install these dependencies. The script will automatically check for them and provide installation instructions if any are missing.
 
 If you need to install dependencies manually:
 ```bash
-sudo apt-get install parted unzip curl util-linux dosfstools secure-delete wget
+sudo apt-get install ruby parted unzip curl util-linux dosfstools secure-delete wget
 ```
 
 ## 🚀 Installation
@@ -50,7 +50,7 @@ sudo apt-get install parted unzip curl util-linux dosfstools secure-delete wget
 
 2. **Make the script executable**:
    ```bash
-   chmod +x setup_clonezilla.sh
+   chmod +x setup_clonezilla.rb
    ```
 
 ## 💻 Usage
@@ -59,22 +59,17 @@ sudo apt-get install parted unzip curl util-linux dosfstools secure-delete wget
 
 **Full Setup** (recommended for new drives):
 ```bash
-sudo ./setup_clonezilla.sh
+sudo ./setup_clonezilla.rb
 ```
 
 **Backup-Only Mode** (for existing Clonezilla drives):
 ```bash
-sudo ./setup_clonezilla.sh --backup-only
+sudo ./setup_clonezilla.rb --backup-only
 ```
 
 **Verbose Mode** (for debugging):
 ```bash
-sudo ./setup_clonezilla.sh -v
-```
-
-**Dry Run** (preview operations without making changes):
-```bash
-sudo ./setup_clonezilla.sh --dry-run
+sudo ./setup_clonezilla.rb -v
 ```
 
 ## 🎛️ Command Line Options
@@ -83,9 +78,11 @@ sudo ./setup_clonezilla.sh --dry-run
 |--------|-------------|
 | `-h, --help` | Show help message and exit |
 | `-v, --verbose` | Enable verbose output for debugging |
-| `-d, --dry-run` | Preview operations without making changes |
 | `-b, --backup-only` | Only add backup to existing Clonezilla drive |
 | `-l, --log-file` | Specify custom log file location |
+| `-V, --version VER` | Specify Clonezilla version (default: auto-detect latest) |
+| `-D, --download-dir DIR` | Directory for downloads (default: /root) |
+| `-y, --yes` | Skip confirmation prompts |
 
 ## 📖 Examples
 
@@ -93,26 +90,38 @@ sudo ./setup_clonezilla.sh --dry-run
 ```bash
 # Run full setup with interactive backup selection
 # The script will prompt you to choose from available backups or enter a custom URL/path
-sudo ./setup_clonezilla.sh -v
+sudo ./setup_clonezilla.rb -v
 ```
 
 ### Example 2: Add Backup to Existing Drive
 ```bash
 # Add backup to existing Clonezilla USB drive
 # You'll be presented with a menu to select from predefined backups or enter a custom source
-sudo ./setup_clonezilla.sh --backup-only
+sudo ./setup_clonezilla.rb --backup-only
 ```
 
-### Example 3: Preview Operations
+### Example 3: Use Specific Clonezilla Version
 ```bash
-# See what the script would do without making changes
-sudo ./setup_clonezilla.sh --dry-run -v
+# Use a specific Clonezilla version instead of auto-detecting
+sudo ./setup_clonezilla.rb -V 3.3.0-33
 ```
 
-### Example 4: Custom Log File
+### Example 4: Custom Download Directory
+```bash
+# Use a different directory for downloads
+sudo ./setup_clonezilla.rb -D /var/tmp
+```
+
+### Example 5: Skip Confirmation Prompts
+```bash
+# Automatically confirm all prompts (use with caution!)
+sudo ./setup_clonezilla.rb -y
+```
+
+### Example 6: Custom Log File
 ```bash
 # Use custom log file location
-sudo ./setup_clonezilla.sh -l /var/log/clonezilla_setup.log
+sudo ./setup_clonezilla.rb -l /var/log/clonezilla_setup.log
 ```
 
 ## 💾 Backup Images
@@ -162,7 +171,7 @@ After restoring the backup, perform these steps:
 ps aux | grep setup_clonezilla
 
 # Remove stale lock file
-sudo rm /tmp/setup_clonezilla.sh.lock
+sudo rm /tmp/setup_clonezilla.rb.lock
 ```
 
 **"Device is currently mounted"**
@@ -186,29 +195,28 @@ mount | grep sdX
 
 ### Log Files
 
-The script creates detailed logs at `/tmp/setup_clonezilla.sh.log` by default.
+The script creates detailed logs at `/tmp/setup_clonezilla.rb.log` by default.
 
 **View recent logs**:
 ```bash
-tail -f /tmp/setup_clonezilla.sh.log
+tail -f /tmp/setup_clonezilla.rb.log
 ```
 
 **Search for errors**:
 ```bash
-grep "ERROR" /tmp/setup_clonezilla.sh.log
+grep "ERROR" /tmp/setup_clonezilla.rb.log
 ```
 
 **View all operations**:
 ```bash
-cat /tmp/setup_clonezilla.sh.log
+cat /tmp/setup_clonezilla.rb.log
 ```
 
 ### Getting Help
 
 1. **Check the logs** for detailed error information
 2. **Run with verbose mode** (`-v`) for more output
-3. **Use dry-run mode** (`--dry-run`) to preview operations
-4. **Review this README** for common solutions
+3. **Review this README** for common solutions
 
 ## 🤝 Contributing
 
