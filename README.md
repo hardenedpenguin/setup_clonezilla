@@ -42,16 +42,13 @@ sudo apt-get install ruby parted unzip curl util-linux dosfstools secure-delete 
 
 ## 🚀 Installation
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/hardenedpenguin/setup_clonezilla.git
-   cd setup_clonezilla
-   ```
-
-2. **Make the script executable**:
-   ```bash
-   chmod +x setup_clonezilla.rb
-   ```
+**Download and run the script**:
+```bash
+cd /tmp
+wget https://raw.githubusercontent.com/hardenedpenguin/setup_clonezilla/main/setup_clonezilla.rb
+chmod +x setup_clonezilla.rb
+sudo ./setup_clonezilla.rb
+```
 
 ## 💻 Usage
 
