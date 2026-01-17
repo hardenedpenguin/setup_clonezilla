@@ -28,8 +28,8 @@ class ClonezillaSetup
   LOCK_FILE = "/tmp/#{File.basename(__FILE__)}.lock"
 
   # Backup URLs
-  BACKUP_ASL3_TRIXIE_URL = 'https://anarchy.w5gle.us/asl3_trixie_amd64_2025-12-25-17.zip'
-  BACKUP_DELL_3040_URL = 'https://anarchy.w5gle.us/Dell-3040-2025-08-10-01-img.zip'
+  BACKUP_ASL3_TRIXIE_URL = 'https://anarchy.w5gle.net/asl3_trixie_amd64_2025-12-25-17.zip'
+  BACKUP_DELL_3040_URL = 'https://anarchy.w5gle.net/Dell-3040-2025-08-10-01-img.zip'
 
   # Colors for output
   RED = "\033[0;31m"
