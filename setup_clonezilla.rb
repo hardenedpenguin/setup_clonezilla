@@ -10,8 +10,8 @@ require 'fileutils'
 require 'optparse'
 require 'uri'
 require 'net/http'
-require 'digest'
 require 'timeout'
+require 'shellwords'
 
 class ClonezillaSetup
   # Configuration constants
@@ -53,6 +53,7 @@ class ClonezillaSetup
     @log_file = LOG_FILE
     @lock_file = LOCK_FILE
     @exit_code = 0
+    @cleaned_up = false
   end
 
   # Utility Functions
@@ -122,7 +123,7 @@ class ClonezillaSetup
   end
 
   def check_disk_space(required_bytes, check_path = '/tmp')
-    df_output = `df -B1 #{check_path.shellescape} 2>/dev/null`.split("\n")
+    df_output = `df -B1 #{Shellwords.shellescape(check_path)} 2>/dev/null`.split("\n")
     available = df_output.length > 1 ? (df_output[1].split.length > 3 ? df_output[1].split[3].to_i : 0) : 0
     if available < required_bytes
       print_status('ERROR', 'Insufficient disk space')
@@ -172,7 +173,7 @@ class ClonezillaSetup
       return true
     end
     log_verbose('Verifying checksum...')
-    actual = `sha256sum #{file_path.shellescape} 2>/dev/null`.split.first
+    actual = `sha256sum #{Shellwords.shellescape(file_path)} 2>/dev/null`.split.first
     if actual == expected_checksum
       log_verbose('Checksum verification passed')
       true
@@ -207,7 +208,7 @@ class ClonezillaSetup
     log_verbose('Checking internet connectivity...')
 
     MAX_RETRIES.times do |i|
-      if system('curl -s --max-time 10 --head --request GET https://www.google.com 2>/dev/null | grep -q "200"')
+      if system("curl -s --max-time 10 --head --request GET #{Shellwords.shellescape(CLONEZILLA_BASE_URL)} 2>/dev/null | grep -q \"200\\|30[12]\"")
         log_verbose('Internet connection verified')
         return true
       end
@@ -245,17 +246,12 @@ class ClonezillaSetup
   def setup_signal_handlers
     trap('INT') { @exit_code = 1; cleanup_and_exit(1) }
     trap('TERM') { @exit_code = 1; cleanup_and_exit(1) }
-    trap('EXIT') do
-      exit_code = if $!.is_a?(SystemExit)
-                    $!.status
-                  else
-                    @exit_code || 0
-                  end
-      cleanup_and_exit(exit_code)
-    end
+    at_exit { cleanup }
   end
 
-  def cleanup_and_exit(exit_code)
+  def cleanup
+    return if @cleaned_up
+    @cleaned_up = true
     log_verbose('Cleaning up...')
 
     # Unmount any mounted partitions
@@ -273,6 +269,14 @@ class ClonezillaSetup
     File.delete(backup_path) if File.exist?(backup_path)
 
     remove_lock
+  rescue => e
+    # Cleanup should never crash the script, especially while exiting.
+    log_verbose("Cleanup encountered an error: #{e.message}")
+  end
+
+  def cleanup_and_exit(exit_code)
+    @exit_code = exit_code
+    cleanup
 
     if exit_code == 0
       print_status('SUCCESS', 'Setup completed successfully!', force_show: true)
@@ -285,19 +289,24 @@ class ClonezillaSetup
 
   # Version Detection
   def get_latest_clonezilla_version
-    url = "#{CLONEZILLA_BASE_URL}/"
     log_verbose('Fetching latest Clonezilla version from SourceForge...')
 
-    html = `curl -sL #{url.shellescape} 2>/dev/null`
-    versions = html.scan(/clonezilla_live_stable\/(\d+\.\d+\.\d+-\d+)\//).flatten
+    # Prefer RSS (more stable than HTML scraping).
+    rss_url = 'https://sourceforge.net/projects/clonezilla/rss?path=/clonezilla_live_stable'
+    rss = `curl -sL #{Shellwords.shellescape(rss_url)} 2>/dev/null`
+    versions = rss.scan(%r{/clonezilla_live_stable/(\d+\.\d+\.\d+-\d+)/}).flatten.uniq
 
+    # Fallback to HTML directory listing if RSS isn't available.
     if versions.empty?
-      versions = html.scan(/clonezilla-live-(\d+\.\d+\.\d+-\d+)/).flatten
+      url = "#{CLONEZILLA_BASE_URL}/"
+      html = `curl -sL #{Shellwords.shellescape(url)} 2>/dev/null`
+      versions = html.scan(/clonezilla_live_stable\/(\d+\.\d+\.\d+-\d+)\//).flatten
+      versions = html.scan(/clonezilla-live-(\d+\.\d+\.\d+-\d+)/).flatten if versions.empty?
     end
 
     return nil if versions.empty?
 
-    # Sort versions by converting to comparable format
+    # Sort versions by converting to comparable format.
     versions.sort_by do |v|
       parts = v.split('-')
       major_minor_patch = parts[0].split('.').map(&:to_i)
@@ -404,7 +413,7 @@ class ClonezillaSetup
       return false
     end
 
-    partitions = `lsblk -lnpo NAME,TYPE #{device.shellescape}`.lines
+    partitions = `lsblk -lnpo NAME,TYPE #{Shellwords.shellescape(device)}`.lines
                      .select { |l| l.split[1] == 'part' }
                      .map { |l| l.split.first }
 
@@ -419,7 +428,7 @@ class ClonezillaSetup
     end
 
     @part2 = partitions[1]
-    fs_type = `blkid -s TYPE -o value #{@part2.shellescape} 2>/dev/null`.chomp
+    fs_type = `blkid -s TYPE -o value #{Shellwords.shellescape(@part2)} 2>/dev/null`.chomp
 
     unless %w[vfat fat32].include?(fs_type.downcase)
       print_status('ERROR', "Second partition on #{device} is not FAT32 (found: #{fs_type})")
@@ -427,7 +436,7 @@ class ClonezillaSetup
     end
 
     log_verbose("Detected Clonezilla drive: #{device}")
-    device_info = `lsblk -d -o NAME,SIZE,MODEL,VENDOR #{device.shellescape} 2>/dev/null`.chomp
+    device_info = `lsblk -d -o NAME,SIZE,MODEL,VENDOR #{Shellwords.shellescape(device)} 2>/dev/null`.chomp
     log_verbose("Device info: #{device_info}")
     log_verbose("Backup partition: #{@part2}")
 
@@ -442,8 +451,22 @@ class ClonezillaSetup
   end
 
   def is_system_disk?(device)
-    device_name = File.basename(device)
-    system("mount | grep -q '^/dev/#{device_name}'") && system("mount | grep -q ' on / '")
+    root_source = `findmnt -n -o SOURCE / 2>/dev/null`.strip
+    return false if root_source.empty?
+
+    root_device = if root_source.start_with?('/dev/')
+                    root_source
+                  else
+                    resolved = `readlink -f #{Shellwords.shellescape(root_source)} 2>/dev/null`.strip
+                    resolved.empty? ? root_source : resolved
+                  end
+
+    return true if root_device == device
+
+    root_parent = `lsblk -no PKNAME #{Shellwords.shellescape(root_device)} 2>/dev/null`.strip
+    return false if root_parent.empty?
+
+    File.basename(device) == root_parent
   end
 
   def get_device_info(device)
@@ -453,7 +476,7 @@ class ClonezillaSetup
       return false
     end
 
-    if system("mount | grep -q #{device.shellescape}")
+    if system("findmnt -rn #{Shellwords.shellescape(device)} >/dev/null 2>&1")
       print_status('ERROR', "Device #{device} is currently mounted. Please unmount it first.")
       print_status('ERROR', "Suggested fix: Run 'umount #{device}*' to unmount all partitions")
       return false
@@ -471,7 +494,7 @@ class ClonezillaSetup
       end
     end
 
-    device_size = `lsblk -b -o SIZE -n -d #{device.shellescape} 2>/dev/null`.to_i
+    device_size = `lsblk -b -o SIZE -n -d #{Shellwords.shellescape(device)} 2>/dev/null`.to_i
 
     if device_size < MIN_DEVICE_SIZE
       print_status('ERROR', "Device #{device} is too small. Minimum size required: #{format_bytes(MIN_DEVICE_SIZE)}")
@@ -480,7 +503,7 @@ class ClonezillaSetup
     end
 
     log_verbose("Selected device: #{device}")
-    device_info = `lsblk -d -o NAME,SIZE,MODEL,VENDOR #{device.shellescape} 2>/dev/null`.chomp
+    device_info = `lsblk -d -o NAME,SIZE,MODEL,VENDOR #{Shellwords.shellescape(device)} 2>/dev/null`.chomp
     log_verbose("Device info: #{device_info}")
 
     true
@@ -496,7 +519,7 @@ class ClonezillaSetup
       name, size, type = parts[0], parts[1], parts[2]
       model = parts[3..-1]&.join(' ') || 'Unknown'
       device = "/dev/#{name}"
-      mounted = system("mount | grep -q '^#{device}'") ? 'YES' : 'NO'
+      mounted = system("findmnt -rn #{Shellwords.shellescape(device)} >/dev/null 2>&1") ? 'YES' : 'NO'
       notes = []
       notes << '[USB/SD]' if is_removable_device?(device)
       notes << '[SYSTEM]' if is_system_disk?(device)
@@ -556,44 +579,54 @@ class ClonezillaSetup
   def partition_device
     print_status('INFO', "Partitioning #{@usb_device}...", force_show: true)
 
-    system("umount #{@usb_device}* >/dev/null 2>&1")
+    # Unmount any existing partitions on the target device (avoid shell globs).
+    begin
+      partitions = `lsblk -lnpo NAME,TYPE #{Shellwords.shellescape(@usb_device)} 2>/dev/null`.lines
+                     .select { |l| l.split[1] == 'part' }
+                     .map { |l| l.split.first }
+      partitions.each do |p|
+        system("umount #{Shellwords.shellescape(p)} >/dev/null 2>&1")
+      end
+    rescue => e
+      log_verbose("Failed to enumerate/unmount partitions: #{e.message}")
+    end
 
     log_verbose("Securely erasing the first 1MB of #{@usb_device}...")
-    unless system("shred -n 1 -z -s 1M #{@usb_device.shellescape}")
+    unless system("shred -n 1 -z -s 1M #{Shellwords.shellescape(@usb_device)}")
       print_status('ERROR', 'Failed to shred device')
       return false
     end
 
     log_verbose('Creating GPT partition table...')
-    unless system("parted -s #{@usb_device.shellescape} mklabel gpt")
+    unless system("parted -s #{Shellwords.shellescape(@usb_device)} mklabel gpt")
       print_status('ERROR', 'Failed to create GPT label')
       return false
     end
 
     log_verbose('Creating partitions...')
-    unless system("parted -s #{@usb_device.shellescape} mkpart primary fat32 1MiB #{CLONEZILLA_PART_SIZE}")
+    unless system("parted -s #{Shellwords.shellescape(@usb_device)} mkpart primary fat32 1MiB #{CLONEZILLA_PART_SIZE}")
       print_status('ERROR', 'Failed to create first partition')
       return false
     end
 
-    unless system("parted -s #{@usb_device.shellescape} mkpart primary fat32 #{CLONEZILLA_PART_SIZE} 100%")
+    unless system("parted -s #{Shellwords.shellescape(@usb_device)} mkpart primary fat32 #{CLONEZILLA_PART_SIZE} 100%")
       print_status('ERROR', 'Failed to create second partition')
       return false
     end
 
-    unless system("parted -s #{@usb_device.shellescape} set 1 boot on")
+    unless system("parted -s #{Shellwords.shellescape(@usb_device)} set 1 boot on")
       print_status('ERROR', 'Failed to set boot flag')
       return false
     end
 
-    unless system("partprobe #{@usb_device.shellescape}")
+    unless system("partprobe #{Shellwords.shellescape(@usb_device)}")
       print_status('ERROR', 'Failed to update partition table')
       return false
     end
 
     sleep 5
 
-    partitions = `lsblk -lnpo NAME,TYPE #{@usb_device.shellescape}`.lines
+    partitions = `lsblk -lnpo NAME,TYPE #{Shellwords.shellescape(@usb_device)}`.lines
                      .select { |l| l.split[1] == 'part' }
                      .map { |l| l.split.first }
 
@@ -614,13 +647,13 @@ class ClonezillaSetup
     log_verbose('Creating filesystems...')
 
     log_verbose('Creating filesystem on Clonezilla partition...')
-    unless system("mkfs.vfat -F 32 #{@part1.shellescape} >/dev/null 2>&1")
+    unless system("mkfs.vfat -F 32 #{Shellwords.shellescape(@part1)} >/dev/null 2>&1")
       print_status('ERROR', 'Failed to create filesystem on first partition')
       return false
     end
 
     log_verbose('Creating filesystem on second partition...')
-    unless system("mkfs.vfat -F 32 #{@part2.shellescape} >/dev/null 2>&1")
+    unless system("mkfs.vfat -F 32 #{Shellwords.shellescape(@part2)} >/dev/null 2>&1")
       print_status('ERROR', 'Failed to create filesystem on second partition')
       return false
     end
@@ -651,7 +684,7 @@ class ClonezillaSetup
 
     return false unless ensure_mount_point
 
-    unless system("mount #{@part1.shellescape} #{MOUNT_POINT.shellescape}")
+    unless system("mount #{Shellwords.shellescape(@part1)} #{Shellwords.shellescape(MOUNT_POINT)}")
       print_status('ERROR', 'Failed to mount Clonezilla partition')
       return false
     end
@@ -664,12 +697,12 @@ class ClonezillaSetup
     return false unless download_file(clonezilla_url, zip_path, 'Clonezilla Live', checksum)
 
     log_verbose('Extracting Clonezilla...')
-    unless system("unzip -q #{zip_path.shellescape} -d #{MOUNT_POINT.shellescape}")
+    unless system("unzip -q #{Shellwords.shellescape(zip_path)} -d #{Shellwords.shellescape(MOUNT_POINT)}")
       print_status('ERROR', 'Failed to extract Clonezilla')
       return false
     end
 
-    unless system("umount #{MOUNT_POINT.shellescape}")
+    unless system("umount #{Shellwords.shellescape(MOUNT_POINT)}")
       print_status('ERROR', 'Failed to unmount Clonezilla partition')
       return false
     end
@@ -721,8 +754,6 @@ class ClonezillaSetup
 
   def setup_backup
     begin
-      force_backup = false
-
       unless @backup_only
         puts
         print 'Would you like to add a backup from a zip file? (yes/no) [no]: '
@@ -746,7 +777,7 @@ class ClonezillaSetup
         return false
       end
 
-    unless system("mount #{@part2.shellescape} #{MOUNT_POINT.shellescape}")
+    unless system("mount #{Shellwords.shellescape(@part2)} #{Shellwords.shellescape(MOUNT_POINT)}")
       print_status('ERROR', "Failed to mount backup partition")
       return false
     end
@@ -758,26 +789,26 @@ class ClonezillaSetup
       
       unless download_result
         print_status('ERROR', 'Backup download failed')
-        system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+        system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
         return false
       end
       
       unless File.exist?(backup_path) && File.size(backup_path) > 0
         print_status('ERROR', 'Downloaded backup file is missing or empty')
-        system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+        system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
         return false
       end
     elsif is_local_file?(backup_input)
       print_status('INFO', "Copying backup from: #{backup_input}", force_show: true)
       unless copy_local_file(backup_input, backup_path, 'backup file')
         print_status('ERROR', 'Backup copy failed')
-        system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+        system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
         return false
       end
     else
       print_status('ERROR', "Invalid backup source: #{backup_input}")
       print_status('ERROR', 'Must be a valid URL (http://...) or local file path')
-      system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       return false
     end
 
@@ -785,14 +816,14 @@ class ClonezillaSetup
     
     unless File.exist?(backup_path) && File.readable?(backup_path)
       print_status('ERROR', "Backup file not accessible: #{backup_path}")
-      system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       return false
     end
-    output, status = Open3.capture2e("unzip -o #{backup_path.shellescape} -d #{MOUNT_POINT.shellescape} 2>&1")
+    output, status = Open3.capture2e("unzip -o #{Shellwords.shellescape(backup_path)} -d #{Shellwords.shellescape(MOUNT_POINT)} 2>&1")
     
     unless status.success?
       print_status('ERROR', 'Failed to extract backup')
-      system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       return false
     end
 
@@ -802,7 +833,7 @@ class ClonezillaSetup
     
     if top_level_items.empty?
       print_status('ERROR', 'Backup extraction completed but no files found')
-      system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       return false
     end
 
@@ -811,10 +842,10 @@ class ClonezillaSetup
 
     begin
       Timeout.timeout(10) do
-        system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+        system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       end
     rescue Timeout::Error
-      system("umount -l #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+      system("umount -l #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
     end
 
     File.delete(backup_path) if File.exist?(backup_path)
@@ -823,7 +854,7 @@ class ClonezillaSetup
     true
     rescue => e
       print_status('ERROR', "Backup setup failed: #{e.message}")
-      system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1")
+      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       false
     end
   end
@@ -938,13 +969,6 @@ class ClonezillaSetup
 
     @exit_code = 0
     print_status('SUCCESS', 'All operations completed successfully!', force_show: true)
-  end
-end
-
-# Add shellescape method to String if not available
-class String
-  def shellescape
-    "'#{gsub("'", "'\\''")}'"
   end
 end
 

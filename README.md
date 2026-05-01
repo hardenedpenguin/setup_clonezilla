@@ -1,7 +1,5 @@
 # Setup Clonezilla
 
-![GitHub total downloads](https://img.shields.io/github/downloads/hardenedpenguin/setup_clonezilla/total?style=flat-square)
-
 A robust, feature-rich script to download and set up Clonezilla Live on USB drives with optional backup installation.
 
 ## 🎯 Overview
