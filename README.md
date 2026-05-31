@@ -30,14 +30,14 @@ This script automates the process of creating a bootable Clonezilla Live USB dri
 ### Required Dependencies
 The script requires Ruby and will automatically check for the following system packages:
 ```bash
-ruby parted unzip curl lsblk blkid mkfs.vfat shred wget
+ruby parted unzip curl lsblk blkid mkfs.vfat mkfs.exfat shred findmnt
 ```
 
 **Note**: You do not need to manually install these dependencies. The script will automatically check for them and provide installation instructions if any are missing.
 
 If you need to install dependencies manually:
 ```bash
-sudo apt-get install ruby parted unzip curl util-linux dosfstools secure-delete wget
+sudo apt-get install ruby parted unzip curl util-linux dosfstools exfatprogs secure-delete
 ```
 
 ## 🚀 Installation
@@ -80,6 +80,10 @@ sudo ./setup_clonezilla.rb -v
 | `-V, --version VER` | Specify Clonezilla version (default: auto-detect latest) |
 | `-D, --download-dir DIR` | Directory for downloads (default: /root) |
 | `-y, --yes` | Skip confirmation prompts |
+| `--device DEVICE` | USB block device (e.g., `sdb` or `/dev/sdb`) |
+| `--backup SOURCE` | Backup: `1`, `2`, URL, or local file path |
+| `--no-backup` | Skip backup setup |
+| `--arch ARCH` | Clonezilla CPU architecture (default: `amd64`) |
 
 ## 📖 Examples
 
@@ -121,7 +125,22 @@ sudo ./setup_clonezilla.rb -y
 sudo ./setup_clonezilla.rb -l /var/log/clonezilla_setup.log
 ```
 
+### Example 7: Non-Interactive Full Setup
+```bash
+# Wipe /dev/sdb, install Clonezilla, and add ASL3 Trixie backup without prompts
+sudo ./setup_clonezilla.rb -y --device sdb --backup 1
+```
+
+### Example 8: Clonezilla Only (No Backup)
+```bash
+sudo ./setup_clonezilla.rb -y --device sdb --no-backup
+```
+
 ## 💾 Backup Images
+
+The script creates two partitions on the USB drive:
+- **Partition 1 (FAT32)**: Clonezilla Live boot files (~513MB)
+- **Partition 2 (exFAT)**: Backup image storage (supports large files)
 
 When you choose to add a backup during setup, the script presents an interactive menu with the following options:
 
@@ -169,6 +188,12 @@ ps aux | grep setup_clonezilla
 
 # Remove stale lock file
 sudo rm /tmp/setup_clonezilla.rb.lock
+```
+
+**"Permission denied" on log file**
+```bash
+# A prior non-root run may own the default log file; remove it or let the script recreate it
+sudo rm /tmp/setup_clonezilla.rb.log
 ```
 
 **"Device is currently mounted"**
@@ -231,6 +256,11 @@ We welcome contributions! Here's how you can help:
 - Add appropriate error handling
 - Update documentation as needed
 - Include test cases when possible
+
+Run unit tests (no root required):
+```bash
+ruby test/test_setup_clonezilla.rb
+```
 
 ## 📄 License
 

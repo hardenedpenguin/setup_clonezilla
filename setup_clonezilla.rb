@@ -5,11 +5,10 @@
 # Copyright (C) 2026 Jory A. Pratt - W5GLE (geekypenguin@gmail.com)
 # Licensed under GPL v2 - see https://www.gnu.org/licenses/gpl-2.0.html
 
+require 'json'
 require 'open3'
 require 'fileutils'
 require 'optparse'
-require 'uri'
-require 'net/http'
 require 'timeout'
 require 'shellwords'
 
@@ -19,7 +18,10 @@ class ClonezillaSetup
   CLONEZILLA_PART_SIZE = '513M'
   MIN_DEVICE_SIZE = 8 * 1024 * 1024 * 1024 # 8GB in bytes
   MAX_RETRIES = 3
-  DOWNLOAD_TIMEOUT = 300 # 5 minutes
+  CONNECT_TIMEOUT = 30 # seconds; no total transfer timeout (large downloads)
+  DEFAULT_ARCH = 'amd64'
+  VALID_DISK_PATTERN = /\A(?:[hsv]d[a-z]|mmcblk\d+|nvme\d+n\d+)\z/
+  BACKUP_FS_TYPES = %w[vfat fat32 exfat].freeze
   MOUNT_POINT = '/mnt/usb'
   ZIP_NAME = 'clonezilla-live.zip'
   BACKUP_NAME = 'backup.zip'
@@ -39,7 +41,7 @@ class ClonezillaSetup
   NC = "\033[0m" # No Color
 
   attr_reader :usb_device, :part1, :part2, :verbose, :backup_only,
-              :skip_confirm, :clonezilla_version, :download_dir
+              :skip_confirm, :clonezilla_version, :download_dir, :arch
 
   def initialize
     @usb_device = nil
@@ -48,15 +50,50 @@ class ClonezillaSetup
     @verbose = false
     @backup_only = false
     @skip_confirm = false
+    @no_backup = false
+    @device_arg = nil
+    @backup_choice = nil
     @clonezilla_version = nil
     @download_dir = DEFAULT_DOWNLOAD_DIR
+    @arch = DEFAULT_ARCH
     @log_file = LOG_FILE
     @lock_file = LOCK_FILE
     @exit_code = 0
     @cleaned_up = false
+    @failure_announced = false
+    @log_write_failed = false
   end
 
   # Utility Functions
+  def log_file_writable?(path)
+    if File.exist?(path)
+      File.writable?(path)
+    else
+      File.writable?(File.dirname(path))
+    end
+  end
+
+  def resolve_log_file(requested_path)
+    return requested_path if log_file_writable?(requested_path)
+
+    if Process.uid.zero? && File.exist?(requested_path)
+      File.delete(requested_path)
+      return requested_path if log_file_writable?(requested_path)
+    end
+
+    fallback = "/tmp/#{File.basename(__FILE__, '.rb')}.#{Process.uid}.log"
+    warn "Warning: using alternate log file: #{fallback}" if requested_path != fallback
+    fallback
+  end
+
+  def append_log_line(timestamp, level, message)
+    File.open(@log_file, 'a') { |f| f.puts("[#{timestamp}] [#{level}] #{message}") }
+  rescue => e
+    return if @log_write_failed
+
+    @log_write_failed = true
+    warn "Warning: could not write to log file #{@log_file}: #{e.message}"
+  end
   def ensure_mount_point
     FileUtils.mkdir_p(MOUNT_POINT) unless Dir.exist?(MOUNT_POINT)
     true
@@ -75,7 +112,7 @@ class ClonezillaSetup
     timestamp = Time.now.strftime('%Y-%m-%d %H:%M:%S')
     unless force_show || level == 'ERROR' || @verbose
       if %w[INFO SUCCESS WARNING].include?(level)
-        File.open(@log_file, 'a') { |f| f.puts("[#{timestamp}] [#{level}] #{message}") }
+        append_log_line(timestamp, level, message)
         return
       end
     end
@@ -87,11 +124,41 @@ class ClonezillaSetup
             else NC
             end
     puts "#{color}[#{level}]#{NC} #{message}"
-    File.open(@log_file, 'a') { |f| f.puts("[#{timestamp}] [#{level}] #{message}") }
+    append_log_line(timestamp, level, message)
   end
 
   def log_verbose(message)
     print_status('INFO', message) if @verbose
+  end
+
+  def read_line(prompt = nil)
+    print prompt if prompt
+    STDIN.gets&.chomp&.strip || ''
+  end
+
+  def valid_disk_name?(name)
+    name.match?(VALID_DISK_PATTERN)
+  end
+
+  def normalize_device_path(input)
+    name = input.to_s.sub(%r{^/dev/}, '')
+    return nil unless valid_disk_name?(name)
+
+    "/dev/#{name}"
+  end
+
+  def abort_run!(code = 1, message = nil)
+    print_status('ERROR', message, force_show: true) if message
+    @exit_code = code
+    announce_failure unless code.zero?
+    exit code
+  end
+
+  def announce_failure
+    return if @failure_announced || @exit_code.zero?
+
+    @failure_announced = true
+    print_status('ERROR', "Setup failed with exit code #{@exit_code}", force_show: true)
   end
 
   def format_bytes(bytes)
@@ -149,27 +216,23 @@ class ClonezillaSetup
 
   def get_checksum_from_url(url)
     checksum_url = "#{url}.sha256"
-    uri = URI(checksum_url)
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = (uri.scheme == 'https')
-    http.open_timeout = 10
-    http.read_timeout = 10
-
-    response = http.get(uri.path.empty? ? '/' : uri.path)
-    checksum = response.body.split.first
+    body = `curl -sL --connect-timeout #{CONNECT_TIMEOUT} #{Shellwords.shellescape(checksum_url)} 2>/dev/null`
+    checksum = body.split.first
 
     return checksum if checksum && checksum.length == 64
 
+    print_status('WARNING', 'Checksum file not found; download will not be verified', force_show: @verbose)
     nil
   rescue => e
     log_verbose("Failed to get checksum: #{e.message}")
+    print_status('WARNING', 'Could not fetch checksum; download will not be verified', force_show: @verbose)
     nil
   end
 
   def verify_checksum(file_path, expected_checksum)
     return true if expected_checksum.nil? || expected_checksum.empty?
     unless system('which sha256sum >/dev/null 2>&1')
-      log_verbose('sha256sum not available, skipping checksum verification')
+      print_status('WARNING', 'sha256sum not available, skipping checksum verification', force_show: @verbose)
       return true
     end
     log_verbose('Verifying checksum...')
@@ -187,20 +250,17 @@ class ClonezillaSetup
 
   # Validation Functions
   def check_root
-    unless Process.uid.zero?
-      print_status('ERROR', 'This script must be run as root.')
-      exit 1
-    end
+    abort_run!(1, 'This script must be run as root.') unless Process.uid.zero?
   end
 
   def check_dependencies
-    required_cmds = %w[parted unzip curl lsblk blkid mkfs.vfat shred wget]
+    required_cmds = %w[parted unzip curl lsblk blkid mkfs.vfat mkfs.exfat shred findmnt]
     missing_deps = required_cmds.reject { |cmd| system("which #{cmd} >/dev/null 2>&1") }
 
     unless missing_deps.empty?
       print_status('ERROR', "Missing dependencies: #{missing_deps.join(', ')}")
-      print_status('INFO', 'Install them using: apt-get install parted unzip curl util-linux dosfstools secure-delete wget')
-      exit 1
+      print_status('INFO', 'Install them using: apt-get install parted unzip curl util-linux dosfstools exfatprogs secure-delete')
+      abort_run!(1)
     end
   end
 
@@ -226,16 +286,21 @@ class ClonezillaSetup
 
   # Lock File Management
   def create_lock
-    if File.exist?(@lock_file)
-      pid = File.read(@lock_file).to_i
-      if pid > 0 && system("kill -0 #{pid} >/dev/null 2>&1")
-        print_status('ERROR', "Another instance is already running (PID: #{pid})")
-        exit 1
-      else
-        File.delete(@lock_file)
-      end
+    if File.exist?(@lock_file) && !File.writable?(@lock_file)
+      File.delete(@lock_file) if Process.uid.zero?
     end
-    File.write(@lock_file, Process.pid.to_s)
+
+    File.open(@lock_file, File::CREAT | File::EXCL | File::WRONLY) do |f|
+      f.write(Process.pid.to_s)
+    end
+  rescue Errno::EEXIST
+    pid = File.read(@lock_file).to_i
+    if pid > 0 && system("kill -0 #{pid} >/dev/null 2>&1")
+      abort_run!(1, "Another instance is already running (PID: #{pid})")
+    else
+      File.delete(@lock_file)
+      retry
+    end
   end
 
   def remove_lock
@@ -246,7 +311,10 @@ class ClonezillaSetup
   def setup_signal_handlers
     trap('INT') { @exit_code = 1; cleanup_and_exit(1) }
     trap('TERM') { @exit_code = 1; cleanup_and_exit(1) }
-    at_exit { cleanup }
+    at_exit do
+      cleanup
+      announce_failure unless @exit_code.zero?
+    end
   end
 
   def cleanup
@@ -254,10 +322,10 @@ class ClonezillaSetup
     @cleaned_up = true
     log_verbose('Cleaning up...')
 
-    # Unmount any mounted partitions
-    if system("mount | grep -q #{MOUNT_POINT.shellescape}")
+    if system("findmnt -rn #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
       log_verbose("Unmounting #{MOUNT_POINT}...")
-      system("umount #{MOUNT_POINT.shellescape} >/dev/null 2>&1") || log_verbose("Failed to unmount #{MOUNT_POINT}")
+      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1") ||
+        log_verbose("Failed to unmount #{MOUNT_POINT}")
     end
 
     cleanup_mount_point
@@ -276,12 +344,13 @@ class ClonezillaSetup
 
   def cleanup_and_exit(exit_code)
     @exit_code = exit_code
+    @failure_announced = true if exit_code != 0
     cleanup
 
     if exit_code == 0
       print_status('SUCCESS', 'Setup completed successfully!', force_show: true)
     else
-      print_status('ERROR', "Setup failed with exit code #{exit_code}")
+      print_status('ERROR', "Setup failed with exit code #{exit_code}", force_show: true)
     end
 
     exit exit_code
@@ -306,20 +375,23 @@ class ClonezillaSetup
 
     return nil if versions.empty?
 
-    # Sort versions by converting to comparable format.
+    sort_clonezilla_versions(versions)
+  rescue => e
+    log_verbose("Failed to get version: #{e.message}")
+    nil
+  end
+
+  def sort_clonezilla_versions(versions)
     versions.sort_by do |v|
       parts = v.split('-')
       major_minor_patch = parts[0].split('.').map(&:to_i)
       build = parts[1].to_i
       [major_minor_patch, build]
     end.last
-  rescue => e
-    log_verbose("Failed to get version: #{e.message}")
-    nil
   end
 
   def build_clonezilla_url(version)
-    "#{CLONEZILLA_BASE_URL}/#{version}/clonezilla-live-#{version}-amd64.zip"
+    "#{CLONEZILLA_BASE_URL}/#{version}/clonezilla-live-#{version}-#{@arch}.zip"
   end
 
   # Network Operations
@@ -388,13 +460,16 @@ class ClonezillaSetup
 
     print_status('INFO', "Downloading #{description}...", force_show: true)
 
-      MAX_RETRIES.times do |i|
+    MAX_RETRIES.times do |i|
       print_status('WARNING', "Retry attempt #{i + 1}/#{MAX_RETRIES}...", force_show: true) if i > 0
-      cmd = "curl -L -o #{output.shellescape} #{resume_flag} --progress-bar --max-time #{DOWNLOAD_TIMEOUT} #{url.shellescape}"
+      cmd = "curl -L --connect-timeout #{CONNECT_TIMEOUT} -o #{Shellwords.shellescape(output)} #{resume_flag} --progress-bar #{Shellwords.shellescape(url)}"
       system(cmd)
       status = $?
       if status.success? && File.exist?(output) && File.size(output) > 0
-        return false unless verify_checksum(output, expected_checksum) if expected_checksum
+        if expected_checksum && !verify_checksum(output, expected_checksum)
+          File.delete(output) if File.exist?(output)
+          return false
+        end
         return true
       end
       log_verbose("Download failed (exit code: #{status.exitstatus})")
@@ -430,8 +505,8 @@ class ClonezillaSetup
     @part2 = partitions[1]
     fs_type = `blkid -s TYPE -o value #{Shellwords.shellescape(@part2)} 2>/dev/null`.chomp
 
-    unless %w[vfat fat32].include?(fs_type.downcase)
-      print_status('ERROR', "Second partition on #{device} is not FAT32 (found: #{fs_type})")
+    unless BACKUP_FS_TYPES.include?(fs_type.downcase)
+      print_status('ERROR', "Second partition on #{device} is not FAT32/exFAT (found: #{fs_type})")
       return false
     end
 
@@ -486,8 +561,7 @@ class ClonezillaSetup
       print_status('WARNING', "Device #{device} may be the system disk!", force_show: true)
       print_status('WARNING', 'Continuing may cause data loss!', force_show: true)
       unless @skip_confirm
-        print 'Continue anyway? (yes/no) [no]: '
-        confirm = STDIN.gets.chomp
+        confirm = read_line('Continue anyway? (yes/no) [no]: ')
         return false unless confirm == 'yes'
       else
         log_verbose('Skipping confirmation (--yes flag used)')
@@ -513,34 +587,62 @@ class ClonezillaSetup
     puts
     printf "%-10s %-10s %-15s %-20s %-10s %s\n", 'DEVICE', 'SIZE', 'TYPE', 'MODEL', 'MOUNTED', 'NOTES'
     puts '---------------------------------------------------------------------------'
-    `lsblk -d -o NAME,SIZE,TYPE,MODEL`.lines.each do |line|
-      parts = line.split
-      next unless parts[2] == 'disk'
-      name, size, type = parts[0], parts[1], parts[2]
-      model = parts[3..-1]&.join(' ') || 'Unknown'
+
+    json = `lsblk -d -J -o NAME,SIZE,TYPE,MODEL,RM 2>/dev/null`
+    devices = JSON.parse(json).fetch('blockdevices', [])
+
+    devices.each do |dev|
+      next unless dev['type'] == 'disk'
+
+      name = dev['name']
       device = "/dev/#{name}"
+      size = dev['size'] || '?'
+      model = dev['model']&.strip
+      model = 'Unknown' if model.nil? || model.empty?
       mounted = system("findmnt -rn #{Shellwords.shellescape(device)} >/dev/null 2>&1") ? 'YES' : 'NO'
       notes = []
-      notes << '[USB/SD]' if is_removable_device?(device)
+      notes << '[USB/SD]' if dev['rm'].to_s == '1' || is_removable_device?(device)
       notes << '[SYSTEM]' if is_system_disk?(device)
-      printf "%-10s %-10s %-15s %-20s %-10s %s\n", name, size, type, model, mounted, notes.join
+      printf "%-10s %-10s %-15s %-20s %-10s %s\n", name, size, 'disk', model, mounted, notes.join
     end
+  rescue JSON::ParserError => e
+    log_verbose("Failed to parse lsblk output: #{e.message}")
+    puts 'Could not list devices.'
+  ensure
     puts
   end
 
-  def get_device_selection
+  def resolve_device_selection
+    if @device_arg
+      @usb_device = normalize_device_path(@device_arg)
+      unless @usb_device
+        abort_run!(1, "Invalid device name: #{@device_arg}")
+      end
+
+      ok = @backup_only ? detect_clonezilla_drive(@usb_device) : get_device_info(@usb_device)
+      abort_run!(1, "Device validation failed for #{@usb_device}") unless ok
+      return
+    end
+
+    get_device_selection_interactive
+  end
+
+  def get_device_selection_interactive
     loop do
       list_devices
 
       if @backup_only
-        print 'Enter the existing Clonezilla USB device (e.g., sda, sdb, mmcblk0): '
+        device_input = read_line('Enter the existing Clonezilla USB device (e.g., sda, sdb, mmcblk0): ')
       else
-        print 'Enter the device you want to use (e.g., sda, sdb, mmcblk0): '
+        device_input = read_line('Enter the device you want to use (e.g., sda, sdb, mmcblk0): ')
       end
+      @usb_device = normalize_device_path(device_input)
 
-      device_input = STDIN.gets.chomp
-      device_input = device_input.sub(%r{^/dev/}, '')
-      @usb_device = "/dev/#{device_input}"
+      unless @usb_device
+        puts
+        print_status('ERROR', 'Invalid device name. Use a whole disk (e.g., sdb, mmcblk0, nvme0n1).')
+        next
+      end
 
       if @backup_only
         break if detect_clonezilla_drive(@usb_device)
@@ -565,10 +667,11 @@ class ClonezillaSetup
     print_status('WARNING', 'This action cannot be undone!', force_show: true)
 
     print "Type 'YES' (in uppercase) to confirm: "
-    confirm = STDIN.gets.chomp
+    confirm = read_line
 
     if confirm != 'YES'
       log_verbose('Operation canceled by user')
+      @exit_code = 0
       exit 0
     end
 
@@ -652,8 +755,8 @@ class ClonezillaSetup
       return false
     end
 
-    log_verbose('Creating filesystem on second partition...')
-    unless system("mkfs.vfat -F 32 #{Shellwords.shellescape(@part2)} >/dev/null 2>&1")
+    log_verbose('Creating filesystem on backup partition (exFAT)...')
+    unless system("mkfs.exfat #{Shellwords.shellescape(@part2)} >/dev/null 2>&1")
       print_status('ERROR', 'Failed to create filesystem on second partition')
       return false
     end
@@ -714,6 +817,32 @@ class ClonezillaSetup
   end
 
   # Backup Setup
+  def resolve_backup_input
+    return nil if @no_backup
+
+    if @backup_choice
+      case @backup_choice
+      when '1'
+        BACKUP_ASL3_TRIXIE_URL
+      when '2'
+        BACKUP_DELL_3040_URL
+      when /^https?:\/\//
+        @backup_choice
+      else
+        expanded = File.expand_path(@backup_choice)
+        if is_local_file?(expanded)
+          expanded
+        else
+          print_status('ERROR', "Invalid backup source: #{@backup_choice}")
+          print_status('ERROR', 'Use 1, 2, a URL, or a readable local file path')
+          nil
+        end
+      end
+    else
+      select_backup_source
+    end
+  end
+
   def select_backup_source
     backup_input = nil
 
@@ -724,8 +853,7 @@ class ClonezillaSetup
     puts '  3) Custom backup (URL or local file path)'
 
     loop do
-      print 'Select backup option (1-3): '
-      backup_choice = STDIN.gets.chomp
+      backup_choice = read_line('Select backup option (1-3): ')
 
       case backup_choice
       when '1'
@@ -737,8 +865,7 @@ class ClonezillaSetup
         log_verbose('Selected: Dell 3040 Backup')
         break
       when '3'
-        print 'Enter the URL or path of the backup file: '
-        backup_input = STDIN.gets.chomp
+        backup_input = read_line('Enter the URL or path of the backup file: ')
         if backup_input.empty?
           print_status('ERROR', 'No backup file provided')
           next
@@ -755,15 +882,21 @@ class ClonezillaSetup
   def setup_backup
     begin
       unless @backup_only
-        puts
-        print 'Would you like to add a backup from a zip file? (yes/no) [no]: '
-        add_backup = STDIN.gets.chomp
-        return true unless add_backup == 'yes'
+        return true if @no_backup
+
+        unless @backup_choice
+          puts
+          add_backup = read_line('Would you like to add a backup from a zip file? (yes/no) [no]: ')
+          return true unless add_backup == 'yes'
+        end
       end
 
-      backup_input = select_backup_source
+      backup_input = resolve_backup_input
 
       if backup_input.nil? || backup_input.empty?
+        if @backup_choice
+          return false
+        end
         print_status('ERROR', 'No backup file provided, skipping backup setup')
         return true
       end
@@ -777,81 +910,84 @@ class ClonezillaSetup
         return false
       end
 
-    unless system("mount #{Shellwords.shellescape(@part2)} #{Shellwords.shellescape(MOUNT_POINT)}")
-      print_status('ERROR', "Failed to mount backup partition")
-      return false
-    end
+      unless system("mount #{Shellwords.shellescape(@part2)} #{Shellwords.shellescape(MOUNT_POINT)}")
+        print_status('ERROR', 'Failed to mount backup partition')
+        return false
+      end
 
-    backup_path = File.join(@download_dir, BACKUP_NAME)
+      backup_path = File.join(@download_dir, BACKUP_NAME)
 
-    if is_url?(backup_input)
-      download_result = download_file(backup_input, backup_path, 'backup file')
-      
-      unless download_result
-        print_status('ERROR', 'Backup download failed')
+      if is_url?(backup_input)
+        return false unless check_internet
+
+        download_result = download_file(backup_input, backup_path, 'backup file')
+
+        unless download_result
+          print_status('ERROR', 'Backup download failed')
+          system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
+          return false
+        end
+
+        unless File.exist?(backup_path) && File.size(backup_path) > 0
+          print_status('ERROR', 'Downloaded backup file is missing or empty')
+          system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
+          return false
+        end
+      elsif is_local_file?(backup_input)
+        print_status('INFO', "Copying backup from: #{backup_input}", force_show: true)
+        unless copy_local_file(backup_input, backup_path, 'backup file')
+          print_status('ERROR', 'Backup copy failed')
+          system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
+          return false
+        end
+      else
+        print_status('ERROR', "Invalid backup source: #{backup_input}")
+        print_status('ERROR', 'Must be a valid URL (http://...) or local file path')
         system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
         return false
       end
-      
-      unless File.exist?(backup_path) && File.size(backup_path) > 0
-        print_status('ERROR', 'Downloaded backup file is missing or empty')
+
+      print_status('INFO', 'Extracting backup...', force_show: true)
+
+      unless File.exist?(backup_path) && File.readable?(backup_path)
+        print_status('ERROR', "Backup file not accessible: #{backup_path}")
         system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
         return false
       end
-    elsif is_local_file?(backup_input)
-      print_status('INFO', "Copying backup from: #{backup_input}", force_show: true)
-      unless copy_local_file(backup_input, backup_path, 'backup file')
-        print_status('ERROR', 'Backup copy failed')
+      output, status = Open3.capture2e("unzip -o #{Shellwords.shellescape(backup_path)} -d #{Shellwords.shellescape(MOUNT_POINT)} 2>&1")
+
+      unless status.success?
+        print_status('ERROR', 'Failed to extract backup')
+        log_verbose("unzip output: #{output}") if output && !output.empty?
+        print_status('ERROR', output.lines.first(5).join, force_show: @verbose) if output && !output.empty?
         system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
         return false
       end
-    else
-      print_status('ERROR', "Invalid backup source: #{backup_input}")
-      print_status('ERROR', 'Must be a valid URL (http://...) or local file path')
-      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
-      return false
-    end
 
-    print_status('INFO', 'Extracting backup...', force_show: true)
-    
-    unless File.exist?(backup_path) && File.readable?(backup_path)
-      print_status('ERROR', "Backup file not accessible: #{backup_path}")
-      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
-      return false
-    end
-    output, status = Open3.capture2e("unzip -o #{Shellwords.shellescape(backup_path)} -d #{Shellwords.shellescape(MOUNT_POINT)} 2>&1")
-    
-    unless status.success?
-      print_status('ERROR', 'Failed to extract backup')
-      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
-      return false
-    end
+      sleep 1
+      top_level_items = Dir.entries(MOUNT_POINT).reject { |f| f == '.' || f == '..' }
 
-    # Verify extraction completed
-    sleep 1
-    top_level_items = Dir.entries(MOUNT_POINT).reject { |f| f == '.' || f == '..' }
-    
-    if top_level_items.empty?
-      print_status('ERROR', 'Backup extraction completed but no files found')
-      system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
-      return false
-    end
-
-    system("sync")
-    sleep 1
-
-    begin
-      Timeout.timeout(10) do
+      if top_level_items.empty?
+        print_status('ERROR', 'Backup extraction completed but no files found')
         system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
+        return false
       end
-    rescue Timeout::Error
-      system("umount -l #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
-    end
 
-    File.delete(backup_path) if File.exist?(backup_path)
-    print_status('SUCCESS', 'Backup setup completed', force_show: true)
+      system('sync')
+      sleep 1
 
-    true
+      begin
+        Timeout.timeout(10) do
+          system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
+        end
+      rescue Timeout::Error
+        system("umount -l #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
+      end
+
+      File.delete(backup_path) if File.exist?(backup_path)
+      print_status('SUCCESS', 'Backup setup completed', force_show: true)
+
+      true
     rescue => e
       print_status('ERROR', "Backup setup failed: #{e.message}")
       system("umount #{Shellwords.shellescape(MOUNT_POINT)} >/dev/null 2>&1")
@@ -872,10 +1008,14 @@ class ClonezillaSetup
           -V, --version VER    Specify Clonezilla version (default: auto-detect latest)
           -D, --download-dir DIR  Directory for downloads (default: #{DEFAULT_DOWNLOAD_DIR})
           -y, --yes            Skip confirmation prompts
+          --device DEVICE      USB block device (e.g., sdb or /dev/sdb)
+          --backup SOURCE      Backup: 1, 2, URL, or local file path
+          --no-backup          Skip backup setup
+          --arch ARCH          Clonezilla CPU architecture (default: #{DEFAULT_ARCH})
 
       Description:
           This script downloads and sets up Clonezilla Live on a USB device.
-          It creates two partitions: one for Clonezilla and one for backups.
+          It creates two partitions: one for Clonezilla (FAT32) and one for backups (exFAT).
 
       Examples:
           #{File.basename(__FILE__)}                    # Run with default settings (auto-detect latest version)
@@ -884,6 +1024,7 @@ class ClonezillaSetup
           #{File.basename(__FILE__)} -V 3.2.0-5        # Use specific Clonezilla version
           #{File.basename(__FILE__)} -D /var/tmp        # Use different directory for downloads
           #{File.basename(__FILE__)} -y                # Skip confirmation prompts
+          #{File.basename(__FILE__)} -y --device sdb --backup 1  # Non-interactive setup with backup
 
     USAGE
   end
@@ -920,24 +1061,43 @@ class ClonezillaSetup
       opts.on('-y', '--yes', 'Skip confirmation prompts') do
         @skip_confirm = true
       end
+
+      opts.on('--device DEVICE', 'USB block device (e.g., sdb or /dev/sdb)') do |device|
+        @device_arg = device
+      end
+
+      opts.on('--backup SOURCE', 'Backup option: 1, 2, URL, or local file path') do |source|
+        @backup_choice = source
+      end
+
+      opts.on('--no-backup', 'Skip backup setup') do
+        @no_backup = true
+      end
+
+      opts.on('--arch ARCH', "Clonezilla architecture (default: #{DEFAULT_ARCH})") do |arch|
+        @arch = arch
+      end
     end.parse!
   end
 
   # Main Function
   def run
+    parse_arguments
+    @log_file = resolve_log_file(@log_file)
+
     log_verbose('Starting Clonezilla setup script')
     log_verbose("Log file: #{@log_file}")
 
-    parse_arguments
+    if @no_backup && @backup_choice
+      abort_run!(1, 'Cannot use --no-backup together with --backup')
+    end
 
     unless Dir.exist?(@download_dir)
-      print_status('ERROR', "Download directory does not exist: #{@download_dir}")
-      exit 1
+      abort_run!(1, "Download directory does not exist: #{@download_dir}")
     end
 
     unless File.writable?(@download_dir)
-      print_status('ERROR', "Download directory is not writable: #{@download_dir}")
-      exit 1
+      abort_run!(1, "Download directory is not writable: #{@download_dir}")
     end
 
     log_verbose("Download directory: #{@download_dir}")
@@ -952,19 +1112,19 @@ class ClonezillaSetup
     end
 
     unless @backup_only
-      exit 1 unless check_internet
+      abort_run!(1) unless check_internet
     end
 
-    get_device_selection
+    resolve_device_selection
 
     if @backup_only
-      exit 1 unless setup_backup
+      abort_run!(1) unless setup_backup
     else
-      exit 1 unless confirm_device_wipe
-      exit 1 unless partition_device
-      exit 1 unless create_filesystems
-      exit 1 unless setup_clonezilla
-      exit 1 unless setup_backup
+      abort_run!(1) unless confirm_device_wipe
+      abort_run!(1) unless partition_device
+      abort_run!(1) unless create_filesystems
+      abort_run!(1) unless setup_clonezilla
+      abort_run!(1) unless setup_backup
     end
 
     @exit_code = 0
